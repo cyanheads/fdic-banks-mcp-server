@@ -46,7 +46,11 @@ export const metricEnum = z
   .enum(METRIC_NAMES)
   .describe('Metric name from the catalog, e.g. roa, net_income_ytd, cet1_ratio.');
 
-/** Optional free-text `state` input: a two-letter code in any case or a full name. */
+/**
+ * Optional free-text `state` input: a two-letter code in any case or a full name. The
+ * longest name it resolves is 24 characters; the 50-character cap bounds what an
+ * `invalid_state` message can echo back.
+ */
 export function stateInput(description: string) {
-  return blankAsUnset(z.string().optional()).describe(description);
+  return blankAsUnset(z.string().max(50).optional()).describe(description);
 }

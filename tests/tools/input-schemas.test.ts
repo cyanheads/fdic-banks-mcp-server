@@ -1,6 +1,7 @@
 /**
  * @fileoverview Tests for the shared input-schema blocks: blank-as-unset
- * preprocessing, report-date and calendar-date patterns, and the metric enum.
+ * preprocessing, report-date and calendar-date patterns, the state length bound,
+ * and the metric enum.
  * @module tests/tools/input-schemas.test
  */
 
@@ -11,6 +12,7 @@ import {
   calendarDateInput,
   metricEnum,
   reportDateInput,
+  stateInput,
 } from '@/mcp-server/tools/input-schemas.js';
 
 describe('blankAsUnset', () => {
@@ -58,6 +60,20 @@ describe('date inputs', () => {
     for (const value of ['3/10/2023', '2023-3-10', '2023-00-10', '2023-03-32', '20230310']) {
       expect(calendar.safeParse(value).success).toBe(false);
     }
+  });
+});
+
+describe('stateInput', () => {
+  const state = stateInput('s');
+
+  it('takes up to 50 characters after trimming, and blank as unset', () => {
+    expect(state.parse('Northern Mariana Islands')).toBe('Northern Mariana Islands');
+    expect(state.parse(` ${'x'.repeat(50)} `)).toBe('x'.repeat(50));
+    expect(state.parse('')).toBeUndefined();
+  });
+
+  it('rejects 51 characters at the schema, before a handler could echo them', () => {
+    expect(state.safeParse('x'.repeat(51)).success).toBe(false);
   });
 });
 

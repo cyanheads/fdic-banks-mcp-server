@@ -10,8 +10,8 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { FAILURE_METHOD_CODES, failureMethodLabel } from '@/services/fdic/failure-methods.js';
 import { callBudget, getFdicService } from '@/services/fdic/fdic-service.js';
-import { failureNameTokens, isCalendarDate } from '@/services/fdic/query-builder.js';
-import type { FailureBucket, FailureFilters, FailureGroupBy } from '@/services/fdic/types.js';
+import { isCalendarDate, nameTokens as tokenize } from '@/services/fdic/query-builder.js';
+import type { FailureBucket, FailureFilters } from '@/services/fdic/types.js';
 import { normalizeState } from '@/services/fdic/us-states.js';
 import { blankAsUnset, calendarDateInput, stateInput } from '../input-schemas.js';
 import { cell, inline, num } from '../markdown.js';
@@ -56,8 +56,8 @@ export const searchFailuresTool = tool('fdic_search_failures', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
-    name: blankAsUnset(z.string().optional()).describe(
-      'Failed institution name; every word of two or more letters or digits must appear in the name FDIC recorded (e.g. "silicon valley"). Case-insensitive.',
+    name: blankAsUnset(z.string().max(100).optional()).describe(
+      'Failed institution name, up to 100 characters; every word of two or more letters or digits must appear in the name FDIC recorded (e.g. "silicon valley"). Case-insensitive. A standalone NA is ignored beside other words, so it also finds names recorded with N.A.',
     ),
     certs: z
       .array(z.number().int().min(1).describe('FDIC certificate number.'))
@@ -286,7 +286,7 @@ export const searchFailuresTool = tool('fdic_search_failures', {
         ...ctx.recoveryFor('invalid_state'),
       });
     }
-    const nameTokens = input.name === undefined ? undefined : failureNameTokens(input.name);
+    const nameTokens = input.name === undefined ? undefined : tokenize(input.name);
     if (nameTokens !== undefined && nameTokens.length === 0) {
       throw ctx.fail('invalid_name', 'name has no word of two or more letters or digits.', {
         ...ctx.recoveryFor('invalid_name'),
@@ -318,9 +318,10 @@ export const searchFailuresTool = tool('fdic_search_failures', {
       ...(input.from_date ? { from: input.from_date } : {}),
       ...(input.to_date ? { to: input.to_date } : {}),
       ...(input.methods?.length ? { methods: input.methods } : {}),
-      ...(input.min_assets !== undefined ? { minAssets: input.min_assets } : {}),
+      // A minimum of 0 bounds nothing; as a range clause it would also drop events with no recorded assets.
+      ...(input.min_assets ? { minAssets: input.min_assets } : {}),
     };
-    const groupBy: FailureGroupBy | undefined = input.group_by;
+    const groupBy = input.group_by;
 
     const service = getFdicService();
     const budget = callBudget();
@@ -347,8 +348,8 @@ export const searchFailuresTool = tool('fdic_search_failures', {
       total_deposits: page.totals.deposits,
       estimated_loss_total: lossTotal(page.totals.count, page.totals.cost, missingByMethod.total),
       estimated_loss_missing_count: missingByMethod.total,
-      by_method: [...page.byMethod]
-        .sort((a, b) => b.count - a.count)
+      by_method: page.byMethod
+        .toSorted((a, b) => b.count - a.count)
         .map((b) => {
           const missing = missingForMethod.get(b.key) ?? 0;
           return {
@@ -367,9 +368,10 @@ export const searchFailuresTool = tool('fdic_search_failures', {
       const missingForGroup = groupedMissing
         ? new Map(groupedMissing.buckets.map((b) => [b.key, b.count]))
         : missingForMethod;
-      const buckets = groupBy === 'year' ? fillYears(grouped.buckets) : [...grouped.buckets];
-      if (groupBy !== 'year')
-        buckets.sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+      const buckets =
+        groupBy === 'year'
+          ? fillYears(grouped.buckets)
+          : grouped.buckets.toSorted((a, b) => b.count - a.count || a.key.localeCompare(b.key));
       groups = buckets.map((b) => toGroup(b, missingForGroup.get(b.key) ?? 0));
     }
 

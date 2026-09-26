@@ -54,7 +54,12 @@ export function notExists(field: string): Clause {
 
 /** `!(FIELD:value)` — rows whose value is anything else. */
 export function notEq(field: string, value: Scalar): Clause {
-  return `!(${eq(field, value)})` as Clause;
+  return not(eq(field, value));
+}
+
+/** `!(clause)` — rows the clause does not match. */
+export function not(clause: Clause): Clause {
+  return `!(${clause})` as Clause;
 }
 
 /** AND of the defined clauses; `undefined` when none. */
@@ -75,45 +80,85 @@ export function titleCase(value: string): string {
 }
 
 /**
- * The value as given (trimmed, whitespace collapsed) and its title-case form,
- * deduplicated. `CITY`, `CITYBR`, and `CNTYNAMB` match exactly and case-sensitively
- * upstream (`Seattle` matches, `seattle` returns zero rows).
+ * The spellings to send for a place name, deduplicated. `CITY`, `CITYBR`, and
+ * `CNTYNAMB` match exactly and case-sensitively upstream (`Seattle` matches,
+ * `seattle` returns zero rows), and FDIC records some places more than one way
+ * (`Winston-Salem` and `Winston Salem`, `Coeur D'Alene` and `Coeur D Alene`,
+ * `Lee'S Summit` and `Lees Summit`). Sent: the value as given (trimmed,
+ * whitespace collapsed) and its title case; for a value with a hyphen or
+ * apostrophe, the title case with the letter after an apostrophe capitalized,
+ * that form with hyphens and apostrophes as spaces, and the title case with
+ * apostrophes dropped; otherwise the title case with each space between two
+ * letters as a hyphen. County possessives keep the plain title case
+ * (`Prince George's`).
  */
 export function caseVariants(value: string): string[] {
   const given = value.trim().replace(/\s+/g, ' ');
-  return [...new Set([given, titleCase(given)])];
+  const title = titleCase(given);
+  if (!/[-']/.test(title)) {
+    return [...new Set([given, title, title.replace(/(?<=\p{L}) (?=\p{L})/gu, '-')])];
+  }
+  const capitalized = title.replace(/'(\p{L})/gu, (_match, ch: string) => `'${ch.toUpperCase()}`);
+  return [
+    ...new Set([
+      given,
+      title,
+      capitalized,
+      capitalized.replace(/[-']/g, ' ').replace(/\s+/g, ' '),
+      title.replace(/'/g, ''),
+    ]),
+  ];
 }
 
 // ---------------------------------------------------------------------------
 // Names
 // ---------------------------------------------------------------------------
 
+/** A standalone `N.A.` (National Association) in any spelling: `N.A.`, `NA`, `N. A.`. */
+const NATIONAL_ASSOCIATION = /(^|[\s,])N\.?\s?A\.?(?=$|[\s,])/giu;
+
+const hasLetterOrDigit = (value: string) => /[\p{L}\p{N}]/u.test(value);
+
 /**
  * Institution name text for `/institutions` `search`: characters other than
- * letters, digits, spaces, and `& ' . , -` stripped, whitespace collapsed.
- * `undefined` when nothing with a letter or digit remains.
+ * letters, digits, spaces, and `& ' . , -` stripped, whitespace collapsed, and a
+ * standalone `N.A.` dropped — FDIC spells most national banks out as "National
+ * Association", and every search word must match, so the abbreviation would miss
+ * them. `undefined` when nothing with a letter or digit remains; a name that is
+ * nothing but `N.A.` is kept as given.
  */
 export function normalizeInstitutionName(value: string): string | undefined {
   const cleaned = value
     .replace(/[^\p{L}\p{N}\s&'.,-]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return /[\p{L}\p{N}]/u.test(cleaned) ? cleaned : undefined;
+  if (!hasLetterOrDigit(cleaned)) return;
+  const withoutNa = cleaned
+    .replace(NATIONAL_ASSOCIATION, '$1')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s,]+|[\s,]+$/g, '');
+  return hasLetterOrDigit(withoutNa) ? withoutNa : cleaned;
 }
 
 /**
- * Failure-name tokens: uppercased, split on anything that is not A–Z or 0–9, and
- * tokens shorter than two characters dropped. Failure names are stored uppercase
- * and `/failures` ignores `search`, so each token becomes a wildcard substring.
+ * Name tokens: uppercased, split on anything that is not A–Z or 0–9, tokens
+ * shorter than two characters dropped, and a standalone `NA` (National
+ * Association) dropped while another token remains — FDIC records it as `N.A.`,
+ * which `*NA*` cannot match, so "Park West Bank, NA" would miss "PARK WEST BANK,
+ * N.A.". Each becomes a `NAME:*TOKEN*` substring clause — failure names are
+ * stored uppercase and `/failures` ignores `search`, and the institution `NAME`
+ * filter is an exact, case-insensitive keyword.
  */
-export function failureNameTokens(value: string): string[] {
-  return value
+export function nameTokens(value: string): string[] {
+  const tokens = value
     .toUpperCase()
     .split(/[^A-Z0-9]+/)
     .filter((token) => token.length >= 2);
+  const withoutNa = tokens.filter((token) => token !== 'NA');
+  return withoutNa.length ? withoutNa : tokens;
 }
 
-/** `NAME:*TOKEN* AND …` over tokens from {@link failureNameTokens}. */
+/** `NAME:*TOKEN* AND …` over tokens from {@link nameTokens}. */
 export function containsAllTokens(field: string, tokens: readonly string[]): Clause | undefined {
   return and(...tokens.map((token) => `${field}:*${token}*` as Clause));
 }

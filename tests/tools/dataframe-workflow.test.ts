@@ -2,7 +2,8 @@
  * @fileoverview End-to-end dataframe workflow for one tenant over the faked FDIC
  * transport and a real in-memory DuckDB canvas: fdic_query_financials and
  * fdic_get_deposits stage oversized results, fdic_dataframe_describe lists them
- * with provenance, fdic_dataframe_query joins them and materializes the join
+ * and describes one by name with provenance and column units,
+ * fdic_dataframe_query joins them and materializes the join
  * with register_as, and fdic_dataframe_drop removes a source while the
  * materialized join lives on.
  * @module tests/tools/dataframe-workflow.test
@@ -27,7 +28,13 @@ import {
   sodBranch,
 } from '../fixtures/fdic-records.js';
 import { createDuckdbCanvas, tenantSession } from '../helpers/canvas.js';
-import { aggEnvelope, envelope, FakeFdic, installFakeService } from '../helpers/fake-fdic.js';
+import {
+  aggEnvelope,
+  envelope,
+  FakeFdic,
+  installFakeService,
+  requestedQuarters,
+} from '../helpers/fake-fdic.js';
 import { contractRecovery } from '../helpers/tool-results.js';
 
 const T0 = new Date('2026-09-26T12:00:00.000Z');
@@ -55,6 +62,11 @@ beforeEach(() => {
   fake = new FakeFdic()
     .on(
       'financials',
+      (p) => p.fields === 'REPDTE',
+      envelope('financials', [{ REPDTE: '20260630', ID: '57701_20260630' }]),
+    )
+    .on(
+      'financials',
       (p) => p.agg_by === 'REPDTE',
       aggEnvelope('financials', 'REPDTE', [
         { key: '20260331', count: 2 },
@@ -64,10 +76,13 @@ beforeEach(() => {
     .on(
       'financials',
       (p) => p.sort_by === 'CERT',
-      (request) => {
-        const repdte = /REPDTE:"(\d{8})"/.exec(request.params.filters ?? '')?.[1] ?? '';
-        return envelope('financials', PANEL[repdte] ?? []);
-      },
+      (request) =>
+        envelope(
+          'financials',
+          requestedQuarters(request.params.filters, Object.keys(PANEL)).flatMap(
+            (repdte) => PANEL[repdte] ?? [],
+          ),
+        ),
     )
     .on('sod', (p) => p.fields === 'YEAR', envelope('sod', [{ YEAR: 2026, ID: '2026_1_1' }]))
     .on('sod', (p) => p.sort_by === 'BRNUM', envelope('sod', BRANCHES))
@@ -108,15 +123,30 @@ describe('dataframe workflow', () => {
     expect(panel.dataset?.row_count).toBe(4);
     expect(deposits.dataset?.row_count).toBe(30);
 
-    const listing = await dataframeDescribeTool.handler(
-      dataframeDescribeTool.input.parse({}),
-      session({ errors: dataframeDescribeTool.errors }),
-    );
-    expect(listing.dataframes.map((d) => [d.name, d.source_tool, d.row_count])).toEqual([
-      [branchName, 'fdic_get_deposits', 30],
-      [panelName, 'fdic_query_financials', 4],
-    ]);
-    expect(listing.dataframes[1]?.column_units).toEqual({
+    const describe = (input: { name?: string }) =>
+      dataframeDescribeTool.handler(
+        dataframeDescribeTool.input.parse(input),
+        session({ errors: dataframeDescribeTool.errors }),
+      );
+    expect(await describe({})).toEqual({
+      dataframes: [
+        {
+          name: branchName,
+          source_tool: 'fdic_get_deposits',
+          row_count: 30,
+          expires_at: expect.any(String),
+        },
+        {
+          name: panelName,
+          source_tool: 'fdic_query_financials',
+          row_count: 4,
+          expires_at: expect.any(String),
+        },
+      ],
+      total: 2,
+    });
+    const [panelMeta] = (await describe({ name: panelName })).dataframes;
+    expect(panelMeta?.column_units).toEqual({
       total_deposits: { unit: 'usd_thousands', basis: 'point_in_time' },
       roa: { unit: 'percent', basis: 'quarter_annualized' },
     });
@@ -153,12 +183,7 @@ ORDER BY p.report_date DESC`;
       ],
     });
 
-    const [derived] = (
-      await dataframeDescribeTool.handler(
-        dataframeDescribeTool.input.parse({ name: 'df_JOIN0_00001' }),
-        session({ errors: dataframeDescribeTool.errors }),
-      )
-    ).dataframes;
+    const [derived] = (await describe({ name: 'df_JOIN0_00001' })).dataframes;
     expect(derived).toMatchObject({
       source_tool: 'fdic_dataframe_query',
       query_params: { sql },
@@ -190,10 +215,7 @@ ORDER BY p.report_date DESC`;
       session({ errors: dataframeQueryTool.errors }),
     );
     expect(survivors.rows).toEqual([{ n: '2' }]);
-    const after = await dataframeDescribeTool.handler(
-      dataframeDescribeTool.input.parse({}),
-      session({ errors: dataframeDescribeTool.errors }),
-    );
+    const after = await describe({});
     expect(after.dataframes.map((d) => d.name)).toEqual(['df_JOIN0_00001', branchName]);
   });
 });

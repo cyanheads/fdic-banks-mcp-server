@@ -2,9 +2,12 @@
  * @fileoverview Adapter between the fdic_ tools and the framework DataCanvas: one
  * shared canvas per tenant, `df_XXXXX_XXXXX` table names, per-table TTL, and
  * provenance (source tool, parameters, column schema and units) kept in
- * `ctx.state` and swept lazily on every operation. SQL runs through the
- * framework's read-only gate with system catalogs denied; its rejections are
- * rethrown under the calling tool's declared reasons and recovery text.
+ * `ctx.state` and swept lazily on every operation. A staging budget caps the
+ * rows a tenant's live dataframes hold, evicting the oldest first, and the
+ * listing can be turned off where every caller shares one tenant. SQL runs
+ * through the framework's read-only gate with system catalogs denied; its
+ * rejections are rethrown under the calling tool's declared reasons and
+ * recovery text.
  * @module services/canvas-bridge/canvas-bridge
  */
 
@@ -62,6 +65,17 @@ export interface StageOptions {
   truncated?: boolean;
 }
 
+export interface CanvasBridgeOptions {
+  /**
+   * Whether describe may enumerate the live dataframes; default true. Off where
+   * every caller is one tenant (HTTP without auth), since a name is then the only
+   * thing that keeps one caller's dataframes from another.
+   */
+  listing?: boolean;
+  /** Rows the tenant's live dataframes may hold together; default 1,000,000. */
+  maxStagedRows?: number;
+}
+
 export interface BridgeQueryOptions {
   /** Rows returned inline; at most `rowLimit`. */
   preview?: number;
@@ -73,11 +87,12 @@ export interface BridgeQueryOptions {
 
 /** The pointer a producer's notice carries once a table is staged. */
 export function stagedNotice(dataset: StagedDataset): string {
-  return `Full set staged as ${dataset.name} (${dataset.row_count} rows) — use fdic_dataframe_describe to inspect its columns, then fdic_dataframe_query to analyze it with SQL.`;
+  return `Full set staged as ${dataset.name} (${dataset.row_count} rows) — use fdic_dataframe_describe with name ${dataset.name} to inspect its columns, then fdic_dataframe_query to analyze it with SQL.`;
 }
 
 const META_PREFIX = 'df-meta/';
 const CANVAS_ID_KEY = 'canvas-id';
+const DEFAULT_MAX_STAGED_ROWS = 1_000_000;
 const TABLE_NAME_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
 /**
@@ -125,16 +140,35 @@ function withContractRecovery(err: unknown, ctx: Context): unknown {
   );
 }
 
-/** SQL with single- and double-quoted literals blanked, so a quoted name never counts as a reference. */
-function stripStringLiterals(sql: string): string {
-  return sql.replace(/'([^'\\]|\\.|'')*'/g, "''").replace(/"([^"\\]|\\.|"")*"/g, '""');
+/**
+ * SQL with single- and double-quoted literals blanked, so a quoted name never counts
+ * as a reference. One left-to-right pass in which a literal left open runs to the end
+ * of the statement: no match attempt can fail and restart at a later quote, so the
+ * scan is linear in the SQL's length.
+ */
+export function stripStringLiterals(sql: string): string {
+  return sql.replace(
+    /'(?:[^'\\]|\\[\s\S]?|'')*(?:'|$)|"(?:[^"\\]|\\[\s\S]?|"")*(?:"|$)/g,
+    (literal) => (literal.startsWith("'") ? "''" : '""'),
+  );
 }
 
 export class CanvasBridge {
-  constructor(private readonly canvas: DataCanvas) {}
+  /** Whether describe may enumerate the live dataframes. */
+  readonly listing: boolean;
+  private readonly maxStagedRows: number;
+
+  constructor(
+    private readonly canvas: DataCanvas,
+    options: CanvasBridgeOptions = {},
+  ) {
+    this.listing = options.listing ?? true;
+    this.maxStagedRows = options.maxStagedRows ?? DEFAULT_MAX_STAGED_ROWS;
+  }
 
   /**
-   * Registers rows as a new `df_<id>` table on the tenant's shared canvas.
+   * Registers rows as a new `df_<id>` table on the tenant's shared canvas, then
+   * evicts the oldest dataframes past the staging budget.
    * A failure is logged and returns `undefined` so the producer's inline answer
    * stands — unless the call was cancelled, which is rethrown as a cancellation.
    */
@@ -162,6 +196,7 @@ export class CanvasBridge {
         ...(options.columnUnits ? { columnUnits: options.columnUnits } : {}),
       };
       await ctx.state.set(`${META_PREFIX}${result.tableName}`, meta);
+      await this.evictToBudget(ctx, instance, result.tableName);
       ctx.log.info('Dataframe staged', {
         tableName: result.tableName,
         rowCount: result.rowCount,
@@ -178,7 +213,10 @@ export class CanvasBridge {
     }
   }
 
-  /** Live dataframes with provenance, newest first; one entry (or none) when `name` is set. */
+  /**
+   * Live dataframes with provenance, newest first; one entry (or none) when `name`
+   * is set. A caller checks `listing` before asking without a name.
+   */
   async describe(ctx: Context, name?: string): Promise<DataframeMeta[]> {
     await this.sweepExpired(ctx);
     if (name) {
@@ -193,7 +231,10 @@ export class CanvasBridge {
   /**
    * One read-only SELECT against the shared canvas, through the framework gate
    * with system catalogs denied. A `df_` name the SQL references that is not
-   * staged fails as `missing_table` before the gate runs.
+   * staged fails as `missing_table` before the gate runs. `registerAs` keeps the
+   * whole result, whatever `rowLimit` says, so its size is known only once it is
+   * materialized: past the staging budget on its own it is dropped and fails as
+   * `register_as_too_large`; otherwise the oldest dataframes make room for it.
    */
   async query(
     ctx: Context,
@@ -230,6 +271,19 @@ export class CanvasBridge {
     if (!result.tableName) return { result };
 
     const tableName = result.tableName;
+    if (result.rowCount > this.maxStagedRows) {
+      await instance.drop(tableName);
+      throw validationError(
+        `register_as would keep ${result.rowCount.toLocaleString('en-US')} rows, more than the ${this.maxStagedRows.toLocaleString('en-US')}-row staging budget, so ${tableName} was not saved.`,
+        {
+          reason: 'register_as_too_large',
+          tableName,
+          rowCount: result.rowCount,
+          maxStagedRows: this.maxStagedRows,
+          ...ctx.recoveryFor('register_as_too_large'),
+        },
+      );
+    }
     const [info] = await instance.describe({ tableName });
     const now = Date.now();
     const meta: DataframeMeta = {
@@ -243,6 +297,7 @@ export class CanvasBridge {
       columnSchema: info?.columns ?? [],
     };
     await ctx.state.set(`${META_PREFIX}${tableName}`, meta);
+    await this.evictToBudget(ctx, instance, tableName);
     return { result, meta };
   }
 
@@ -264,13 +319,49 @@ export class CanvasBridge {
     const referenced = stripStringLiterals(sql).match(/\bdf_[A-Z0-9]{5}_[A-Z0-9]{5}\b/g) ?? [];
     for (const name of new Set(referenced)) {
       if ((await ctx.state.get(`${META_PREFIX}${name}`)) === null) {
-        throw notFound(`Dataframe ${name} does not exist or has expired.`, {
-          reason: 'missing_table',
-          tableName: name,
-          ...ctx.recoveryFor('missing_table'),
-        });
+        throw notFound(
+          `Dataframe ${name} does not exist: it expired, was dropped to make room for newer dataframes, or was never staged.`,
+          {
+            reason: 'missing_table',
+            tableName: name,
+            ...ctx.recoveryFor('missing_table'),
+          },
+        );
       }
     }
+  }
+
+  /**
+   * Drops the oldest dataframes, provenance included, until the tenant's live rows
+   * fit the staging budget. `newest`, the dataframe just saved, is never dropped,
+   * so the one call that made room keeps its result. The log names no table:
+   * where callers share a tenant, the evicted names are other callers' handles.
+   */
+  private async evictToBudget(
+    ctx: Context,
+    instance: CanvasInstance,
+    newest: string,
+  ): Promise<void> {
+    let liveRows = 0;
+    const older: DataframeMeta[] = [];
+    for await (const { meta } of this.iterateMeta(ctx)) {
+      liveRows += meta.rowCount;
+      if (meta.tableName !== newest) older.push(meta);
+    }
+    if (liveRows <= this.maxStagedRows) return;
+    older.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    let evicted = 0;
+    for (const meta of older) {
+      if (liveRows <= this.maxStagedRows) break;
+      await instance.drop(meta.tableName);
+      await ctx.state.delete(`${META_PREFIX}${meta.tableName}`);
+      liveRows -= meta.rowCount;
+      evicted++;
+    }
+    ctx.log.info('Evicted the oldest dataframes to stay within the staging budget', {
+      evicted,
+      maxStagedRows: this.maxStagedRows,
+    });
   }
 
   /**
@@ -349,8 +440,11 @@ let _bridge: CanvasBridge | undefined;
  * built no DataCanvas (`CANVAS_PROVIDER_TYPE=none`); producers then keep their
  * inline preview and the dataframe tools report `canvas_unavailable`.
  */
-export function initCanvasBridge(canvas: DataCanvas | undefined): void {
-  _bridge = canvas ? new CanvasBridge(canvas) : undefined;
+export function initCanvasBridge(
+  canvas: DataCanvas | undefined,
+  options?: CanvasBridgeOptions,
+): void {
+  _bridge = canvas ? new CanvasBridge(canvas, options) : undefined;
 }
 
 /** The bridge, or `undefined` when no canvas is configured. */

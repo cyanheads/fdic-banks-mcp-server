@@ -3,7 +3,8 @@
  * must land before the CANVAS_PROVIDER_TYPE default and the drop gate are read
  * (Design Decision 36), run from a temporary working directory with createApp()
  * faked at the process boundary so no transport starts; the createApp() options;
- * and the setup()/teardown() wiring of the FDIC service and the canvas bridge.
+ * the setup()/teardown() wiring of the FDIC service and the canvas bridge; and
+ * the dataframe listing turned off only over HTTP with auth off.
  * @module tests/index.test
  */
 
@@ -122,7 +123,9 @@ describe('createApp wiring', () => {
       sessionMode: 'stateless',
       resources: [],
       prompts: [],
-      instructions: expect.any(String),
+      instructions: expect.stringContaining(
+        'naming a staged df_<id> table — pass that name to fdic_dataframe_describe for its columns, then query it with fdic_dataframe_query.',
+      ),
     });
     expect(options.tools?.map((t) => t.name)).toEqual([
       'fdic_search_institutions',
@@ -144,8 +147,9 @@ describe('createApp wiring', () => {
     const { CanvasBridge, getCanvasBridge } = await import(
       '@/services/canvas-bridge/canvas-bridge.js'
     );
-    const withCanvas = { canvas: canvasDouble().canvas } as unknown as CoreServices;
-    const withoutCanvas = {} as CoreServices;
+    const stdio = { mcpTransportType: 'stdio', mcpAuthMode: 'none' };
+    const withCanvas = { canvas: canvasDouble().canvas, config: stdio } as unknown as CoreServices;
+    const withoutCanvas = { config: stdio } as unknown as CoreServices;
 
     expect(() => getFdicService()).toThrow();
     await options.setup?.(withCanvas);
@@ -158,4 +162,24 @@ describe('createApp wiring', () => {
     await options.teardown?.(withoutCanvas);
     expect(() => getFdicService()).toThrow();
   });
+
+  it.each([
+    ['stdio', 'none', true],
+    ['http', 'jwt', true],
+    ['http', 'oauth', true],
+    ['http', 'none', false],
+  ] as const)(
+    'over %s with auth %s, sets the dataframe listing to %s',
+    async (transport, auth, listing) => {
+      const options = await boot();
+      const { getCanvasBridge } = await import('@/services/canvas-bridge/canvas-bridge.js');
+      const core = {
+        canvas: canvasDouble().canvas,
+        config: { mcpTransportType: transport, mcpAuthMode: auth },
+      } as unknown as CoreServices;
+      await options.setup?.(core);
+      expect(getCanvasBridge()?.listing).toBe(listing);
+      await options.teardown?.(core);
+    },
+  );
 });

@@ -2,7 +2,8 @@
  * @fileoverview Fake FDIC BankFind transport for tests. Implements the service's
  * `getJson` seam as a route table that records every URL it receives, plus
  * builders for the BankFind response envelope in its recorded shapes (row hits,
- * aggregation buckets, the 400 error body) across all four endpoints.
+ * aggregation buckets, the 400 error body) across all four endpoints, and the
+ * quarter matcher that panel page responders serve single quarters and ranges by.
  * @module tests/helpers/fake-fdic
  */
 
@@ -168,6 +169,33 @@ export function aggEnvelope(
     })),
     totals: { count: total, ...(total > 0 ? sumTotals : {}) },
   };
+}
+
+/** The `count` quarter-ends ending at 2026-06-30 (the fakes' latest quarter), newest first, as `YYYYMMDD`. */
+export function quarterEnds(count: number): string[] {
+  return Array.from({ length: count }, (_, i) => {
+    const index = 2026 * 4 + 1 - i;
+    return `${Math.floor(index / 4)}${['0331', '0630', '0930', '1231'][index % 4]}`;
+  });
+}
+
+/**
+ * The quarters (`YYYYMMDD` keys) a panel page request selects: the one named by
+ * `REPDTE:"<q>"`, or every key within `REPDTE:[<a> TO <b>]`, newest first.
+ */
+export function requestedQuarters(filters: string | undefined, keys: readonly string[]): string[] {
+  const one = /REPDTE:"(\d{8})"/.exec(filters ?? '')?.[1];
+  const span = /REPDTE:\[(\d{8}) TO (\d{8})\]/.exec(filters ?? '');
+  return keys
+    .filter((key) =>
+      one !== undefined
+        ? key === one
+        : span
+          ? key >= (span[1] ?? '') && key <= (span[2] ?? '')
+          : false,
+    )
+    .sort()
+    .reverse();
 }
 
 /** FDIC's 400 body for a calendar-invalid date in a date-typed range. */

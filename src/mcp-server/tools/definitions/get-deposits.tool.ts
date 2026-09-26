@@ -74,11 +74,11 @@ export const getDepositsTool = tool('fdic_get_deposits', {
       'FDIC certificate number, from fdic_search_institutions. Alone: its branches and per-state share. With a geography: its position in that market.',
     ),
     state: stateInput('Branch state: two-letter code in any case or full name.'),
-    county: blankAsUnset(z.string().optional()).describe(
-      'County as FDIC spells it (King, not King County — a trailing " County" is stripped), matched exactly as given or in title case; requires state.',
+    county: blankAsUnset(z.string().max(50).optional()).describe(
+      'County as FDIC spells it (King, not King County — a trailing " County" is stripped), up to 50 characters; matched exactly as given or in title case, with a hyphen, apostrophe, or space between words also tried the other ways FDIC records it; requires state.',
     ),
-    city: blankAsUnset(z.string().optional()).describe(
-      'Branch city as FDIC spells it (Seattle, St. Louis), matched exactly as given or in title case; requires state.',
+    city: blankAsUnset(z.string().max(50).optional()).describe(
+      'Branch city as FDIC spells it (Seattle, St. Louis), up to 50 characters; matched exactly as given or in title case, with a hyphen, apostrophe, or space between words also tried the other ways FDIC records it (Winston-Salem finds Winston Salem); requires state.',
     ),
     zip: blankAsUnset(
       z
@@ -89,10 +89,13 @@ export const getDepositsTool = tool('fdic_get_deposits', {
     msa_code: blankAsUnset(
       z
         .string()
-        .regex(/^\d{5}$/, 'Expected a five-digit CBSA code such as 42660')
+        .regex(
+          /^[1-9]\d{4}$/,
+          'Expected a five-digit metropolitan CBSA code (10180–49740, such as 42660); no code starts with 0',
+        )
         .optional(),
     ).describe(
-      'Five-digit CBSA (metropolitan area) code; branch rows from a state-level call carry msa_code values to reuse.',
+      'Five-digit CBSA (metropolitan area) code, 10180–49740; branch rows from a state-level call carry msa_code values to reuse. Non-metropolitan branches have no code.',
     ),
     year: blankAsUnset(z.number().int().min(1994).optional()).describe(
       'Survey year (deposits as of June 30), 1994 on. Omit for the latest survey.',
@@ -547,11 +550,10 @@ export const getDepositsTool = tool('fdic_get_deposits', {
             ctx,
             budget,
           );
-      const withName = <T extends { cert: number }>(row: T) => {
+      institutions = preview.map((row) => {
         const name = names.get(row.cert);
         return name === undefined ? row : { ...row, name };
-      };
-      institutions = preview.map(withName);
+      });
       if (staging) {
         dataset = await bridge.stage(ctx, {
           sourceTool: 'fdic_get_deposits',

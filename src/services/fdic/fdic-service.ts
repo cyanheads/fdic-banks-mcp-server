@@ -43,6 +43,8 @@ import {
   containsAllTokens,
   eq,
   isoToRepdte,
+  nameTokens,
+  not,
   notEq,
   notExists,
   range,
@@ -78,13 +80,13 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** Longest a call waits in the pacer queue before it is shed. */
 const MAX_QUEUE_WAIT_MS = 15_000;
 /** Wall-clock budget of one tool call, so the classified error lands inside a client's 60 s timeout. */
-export const TOOL_BUDGET_MS = 45_000;
+const TOOL_BUDGET_MS = 45_000;
 /** Budget of the multi-quarter panel fetch, the one long-running call. */
 export const PANEL_BUDGET_MS = 55_000;
 /** Largest page BankFind serves; also the aggregation bucket cap (`agg_limit`). */
 const MAX_PAGE = 10_000;
-/** Panel quarters fetched concurrently (the pacer still bounds requests in flight). */
-const PANEL_QUARTER_CONCURRENCY = 3;
+/** Panel runs fetched concurrently (the pacer still bounds requests in flight). */
+const PANEL_RUN_CONCURRENCY = 3;
 /** Cooldown the pacer applies after a 429; also the wait reported when FDIC names none. */
 const COOLDOWN_BASE_MS = 5_000;
 
@@ -199,14 +201,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** FDIC's 400 envelope → `{ detail, parameter }`, from a parsed body or captured body text. */
+/**
+ * FDIC's 400 envelope → `{ detail, parameter }`, from a parsed body or captured body
+ * text. Text that is not JSON (a gateway page) yields nothing: it is not FDIC's
+ * message, and a raw upstream body never reaches the caller.
+ */
 function badRequestDetail(body: unknown): { detail?: string; parameter?: string } {
   let parsed = body;
   if (typeof body === 'string') {
     try {
       parsed = JSON.parse(body);
     } catch {
-      return { detail: body };
+      return {};
     }
   }
   const first = isRecord(parsed) && Array.isArray(parsed.errors) ? parsed.errors[0] : undefined;
@@ -257,8 +263,27 @@ function retryAfterSeconds(value: unknown): number | undefined {
 }
 
 /**
+ * The calling tool's recovery for a rate-limit reason with the wait filled in: the
+ * contract text says `retryAfter seconds`, which names the number only in
+ * `data.retryAfter`, out of reach of a client that reads `content[]` alone.
+ */
+function waitRecovery(
+  reason: 'pacer_shed' | 'upstream_rate_limited',
+  seconds: number | undefined,
+  ctx: Context,
+) {
+  const resolved = ctx.recoveryFor(reason);
+  if (seconds === undefined || !('recovery' in resolved)) return resolved;
+  const wait = `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
+  return { recovery: { hint: resolved.recovery.hint.replace('retryAfter seconds', wait) } };
+}
+
+/**
  * Rewraps the two rate-limit shapes under the reasons every data tool declares,
- * with the calling tool's recovery text, and a 400 as this server's fault.
+ * with the calling tool's recovery text naming the wait, and a 400 as this
+ * server's fault. Any other HTTP failure keeps its code and message, but its
+ * `data` — which reaches the caller as `structuredContent.error.data` — is cut to
+ * the status fields; the captured upstream body stays on the cause, for logs only.
  */
 function mapFailure(err: unknown, ctx: Context): unknown {
   if (!(err instanceof McpError)) return err;
@@ -267,23 +292,43 @@ function mapFailure(err: unknown, ctx: Context): unknown {
     if (data.reason === 'pacer_shed') {
       return rateLimited(
         err.message,
-        { ...data, reason: 'pacer_shed', retryable: true, ...ctx.recoveryFor('pacer_shed') },
+        {
+          ...data,
+          reason: 'pacer_shed',
+          retryable: true,
+          ...waitRecovery('pacer_shed', retryAfterSeconds(data.retryAfter), ctx),
+        },
         { cause: err },
       );
     }
+    const retryAfter = retryAfterSeconds(data.retryAfter) ?? COOLDOWN_BASE_MS / 1000;
     return rateLimited(
       'FDIC is throttling requests (HTTP 429) and retries were exhausted.',
       {
         reason: 'upstream_rate_limited',
-        retryAfter: retryAfterSeconds(data.retryAfter) ?? COOLDOWN_BASE_MS / 1000,
+        retryAfter,
         retryable: true,
-        ...ctx.recoveryFor('upstream_rate_limited'),
+        ...waitRecovery('upstream_rate_limited', retryAfter, ctx),
       },
       { cause: err },
     );
   }
   if (err.code === JsonRpcErrorCode.InvalidParams) {
     return queryRejected(data.body ?? data.responseBody ?? data, err);
+  }
+  if (data.errorSource === 'FetchHttpError') {
+    const { status, statusText, retryAfter, retryable } = data;
+    return new McpError(
+      err.code,
+      err.message,
+      {
+        status,
+        statusText,
+        ...(retryAfter !== undefined ? { retryAfter } : {}),
+        ...(retryable !== undefined ? { retryable } : {}),
+      },
+      { cause: err },
+    );
   }
   return err;
 }
@@ -476,6 +521,33 @@ export function planPanelQuarters(
   return plan;
 }
 
+/** Contiguous planned quarters fetched together, newest first; `rows` is their planned sum. */
+interface PanelRun {
+  newest: string;
+  oldest: string;
+  rows: number;
+}
+
+/**
+ * Groups a plan's quarters, newest first, into contiguous runs of at most one
+ * page (10,000 rows); a quarter larger than a page is a run of its own. The
+ * plan is a prefix of the preflight's non-empty quarters, so a `REPDTE` range
+ * over a run selects no other matching quarter.
+ */
+function panelRuns(plan: readonly PanelQuarter[]): PanelRun[] {
+  const runs: PanelRun[] = [];
+  for (const quarter of plan) {
+    const run = runs.at(-1);
+    if (run && run.rows + quarter.rows <= MAX_PAGE) {
+      run.oldest = quarter.reportDate;
+      run.rows += quarter.rows;
+    } else {
+      runs.push({ newest: quarter.reportDate, oldest: quarter.reportDate, rows: quarter.rows });
+    }
+  }
+  return runs;
+}
+
 /** Runs `fn` over `items` with at most `limit` in flight, keeping input order. */
 async function mapPool<T, R>(
   items: readonly T[],
@@ -519,8 +591,6 @@ export class FdicService {
   private readonly pacer: Pacer;
 
   constructor(options: FdicServiceOptions = {}) {
-    const needsConfig = options.pacer === undefined || options.cacheTtlSeconds === undefined;
-    const cfg = needsConfig ? getServerConfig() : undefined;
     this.getJson =
       options.getJson ??
       createFetchJson(
@@ -530,12 +600,12 @@ export class FdicService {
       options.pacer ??
       createPacer({
         name: 'fdic',
-        minStartGapMs: Math.ceil(1000 / (cfg?.rateLimitRps ?? 8)),
+        minStartGapMs: Math.ceil(1000 / getServerConfig().rateLimitRps),
         maxConcurrent: 4,
         cooldown: { baseMs: COOLDOWN_BASE_MS, maxMs: 60_000 },
       });
     this.cache = new ResponseCache(
-      (options.cacheTtlSeconds ?? cfg?.cacheTtlSeconds ?? 3600) * 1000,
+      (options.cacheTtlSeconds ?? getServerConfig().cacheTtlSeconds) * 1000,
       options.now ?? Date.now,
     );
   }
@@ -629,46 +699,83 @@ export class FdicService {
   // Institutions
   // -------------------------------------------------------------------------
 
+  /**
+   * One page of institutions. Relevance order for a name search is two searches:
+   * active institutions whose current name holds every query word, then every
+   * other match, each in FDIC's match-score order — the score alone ranks inactive
+   * affiliates and fuzzy or former-name matches above the operating bank a query
+   * names. The two tiers partition the match set, so `total` is their sum.
+   */
   async searchInstitutions(
     q: InstitutionSearch,
     ctx: Context,
     budget: CallBudget,
   ): Promise<{ dataAsOf: string; rows: InstitutionRecord[]; total: number }> {
-    const sort =
-      q.sort === 'relevance'
-        ? undefined
-        : q.sort === 'name'
-          ? { sort_by: 'NAME', sort_order: 'ASC' }
-          : { sort_by: 'ASSET', sort_order: 'DESC' };
-    const envelope = await this.query(
-      'institutions',
-      {
-        search: q.name ? `NAME:${q.name}` : undefined,
-        filters: and(
-          q.certs?.length ? anyOf('CERT', q.certs) : undefined,
-          q.state ? eq('STALP', q.state) : undefined,
-          q.city ? anyOf('CITY', caseVariants(q.city)) : undefined,
-          q.status === 'any' ? undefined : eq('ACTIVE', q.status === 'active' ? 1 : 0),
-          q.bankClasses?.length ? anyOf('BKCLASS', q.bankClasses) : undefined,
-          q.minAssets !== undefined || q.maxAssets !== undefined
-            ? range('ASSET', q.minAssets, q.maxAssets)
-            : undefined,
-          q.holdingCompanyRssd !== undefined
-            ? eq('RSSDHCR', String(q.holdingCompanyRssd))
-            : undefined,
-        ),
-        fields: INSTITUTION_FIELDS,
-        limit: q.limit,
-        offset: q.offset,
-        ...sort,
-      },
-      ctx,
-      budget,
+    const filters = and(
+      q.certs?.length ? anyOf('CERT', q.certs) : undefined,
+      q.state ? eq('STALP', q.state) : undefined,
+      q.city ? anyOf('CITY', caseVariants(q.city)) : undefined,
+      q.status === 'any' ? undefined : eq('ACTIVE', q.status === 'active' ? 1 : 0),
+      q.bankClasses?.length ? anyOf('BKCLASS', q.bankClasses) : undefined,
+      q.minAssets !== undefined || q.maxAssets !== undefined
+        ? range('ASSET', q.minAssets, q.maxAssets)
+        : undefined,
+      q.holdingCompanyRssd !== undefined ? eq('RSSDHCR', String(q.holdingCompanyRssd)) : undefined,
     );
+    const page = (clause: Clause | undefined, offset: number, limit: number, sort?: Params) =>
+      this.query(
+        'institutions',
+        {
+          search: q.name ? `NAME:${q.name}` : undefined,
+          filters: clause,
+          fields: INSTITUTION_FIELDS,
+          limit,
+          offset,
+          ...sort,
+        },
+        ctx,
+        budget,
+      );
+
+    const current =
+      q.sort === 'relevance' && q.name && q.status !== 'inactive'
+        ? and(
+            q.status === 'any' ? eq('ACTIVE', 1) : undefined,
+            containsAllTokens('NAME', nameTokens(q.name)),
+          )
+        : undefined;
+    if (!current) {
+      const sort =
+        q.sort === 'relevance'
+          ? undefined
+          : q.sort === 'name'
+            ? { sort_by: 'NAME', sort_order: 'ASC' }
+            : { sort_by: 'ASSET', sort_order: 'DESC' };
+      const envelope = await page(filters, q.offset, q.limit, sort);
+      return {
+        rows: envelope.rows.map(normalizeInstitution),
+        total: envelope.total,
+        dataAsOf: envelope.dataAsOf,
+      };
+    }
+
+    const lead = and(filters, current);
+    const rest = and(filters, not(current));
+    // The rest tier starts where the lead tier runs out; on the first page that is its own start.
+    const [first, second] =
+      q.offset === 0
+        ? await Promise.all([page(lead, 0, q.limit), page(rest, 0, q.limit)])
+        : await page(lead, q.offset, q.limit).then(
+            async (first) =>
+              [
+                first,
+                await page(rest, Math.max(0, q.offset - first.total), q.limit - first.rows.length),
+              ] as const,
+          );
     return {
-      rows: envelope.rows.map(normalizeInstitution),
-      total: envelope.total,
-      dataAsOf: envelope.dataAsOf,
+      rows: [...first.rows, ...second.rows].slice(0, q.limit).map(normalizeInstitution),
+      total: first.total + second.total,
+      dataAsOf: first.dataAsOf,
     };
   }
 
@@ -882,9 +989,11 @@ export class FdicService {
   }
 
   /**
-   * The panel rows for planned quarters, paged per quarter by CERT (the only
-   * key unique within a quarter; the row ID is not sortable), up to three
-   * quarters in flight. Each quarter stops at its planned row count.
+   * The panel rows for planned quarters. Contiguous quarters that together fit
+   * one page are fetched in one request over their `REPDTE` range; a quarter
+   * larger than a page is offset-paged alone by CERT, the only key unique within
+   * a quarter (the row ID is not sortable), so offset paging never spans
+   * quarters. Up to three runs are in flight; each stops at its planned row count.
    */
   async getPanelRows(
     filters: PanelFilters,
@@ -895,12 +1004,17 @@ export class FdicService {
   ): Promise<PanelRow[]> {
     const base = panelClause(filters);
     const fields = ['CERT', 'NAME', 'STALP', 'REPDTE', ...metricFields(metrics)].join(',');
-    const perQuarter = await mapPool(plan, PANEL_QUARTER_CONCURRENCY, async (quarter) => {
-      const clause = and(base, eq('REPDTE', isoToRepdte(quarter.reportDate)));
+    const perRun = await mapPool(panelRuns(plan), PANEL_RUN_CONCURRENCY, async (run) => {
+      const clause = and(
+        base,
+        run.newest === run.oldest
+          ? eq('REPDTE', isoToRepdte(run.newest))
+          : range('REPDTE', isoToRepdte(run.oldest), isoToRepdte(run.newest)),
+      );
       const rows: PanelRow[] = [];
       let fetched = 0;
-      while (fetched < quarter.rows) {
-        const limit = Math.min(MAX_PAGE, quarter.rows - fetched);
+      while (fetched < run.rows) {
+        const limit = Math.min(MAX_PAGE, run.rows - fetched);
         const envelope = await this.query(
           'financials',
           {
@@ -917,12 +1031,13 @@ export class FdicService {
         fetched += envelope.rows.length;
         for (const row of envelope.rows) {
           const cert = num(row.data.CERT);
-          if (cert === null) continue;
+          const repdte = str(row.data.REPDTE);
+          if (cert === null || repdte === undefined) continue;
           rows.push({
             cert,
             name: str(row.data.NAME) ?? '',
             state: str(row.data.STALP) ?? '',
-            report_date: quarter.reportDate,
+            report_date: repdteToIso(repdte),
             values: metricValues(row.data, metrics),
           });
         }
@@ -930,7 +1045,7 @@ export class FdicService {
       }
       return rows;
     });
-    return perQuarter.flat();
+    return perRun.flat();
   }
 
   // -------------------------------------------------------------------------
@@ -968,7 +1083,7 @@ export class FdicService {
     );
     const subtotals = envelope.totals.subtotal_by_RESTYPE1;
     const byMethod = (Array.isArray(subtotals) ? subtotals : [])
-      .filter((s): s is Record<string, unknown> => typeof s === 'object' && s !== null)
+      .filter(isRecord)
       .map((s) => ({ key: str(s.RESTYPE1) ?? '', ...totalsOf(s) }));
     return {
       rows: envelope.rows.map(normalizeFailure),

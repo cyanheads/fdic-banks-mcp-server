@@ -23,15 +23,16 @@ function valueCell(value: unknown): string {
 export const dataframeQueryTool = tool('fdic_dataframe_query', {
   title: 'Query staged dataframes with SQL',
   description:
-    'Run one read-only SELECT (DuckDB SQL) across the df_<id> dataframes that fdic_query_financials and fdic_get_deposits staged or an earlier register_as saved; joins, aggregates, window functions, and CTEs work. List the tables and their columns with fdic_dataframe_describe first. DOUBLE columns come back as JSON numbers and dollar columns are thousands of US dollars; BIGINT results such as COUNT(*) come back as strings, so CAST them to INTEGER or DOUBLE for arithmetic. Writes, DDL, file-reading functions, and system catalogs are rejected. register_as materializes the result as a new dataframe with a fresh TTL.',
+    'Run one read-only SELECT (DuckDB SQL) across the df_<id> dataframes that fdic_query_financials and fdic_get_deposits staged or an earlier register_as saved; joins, aggregates, window functions, and CTEs work. Before writing SQL, pass each table name to fdic_dataframe_describe to read its columns. DOUBLE columns come back as JSON numbers and dollar columns are thousands of US dollars; BIGINT results such as COUNT(*) come back as strings, so CAST them to INTEGER or DOUBLE for arithmetic. Writes, DDL, file-reading functions, and system catalogs are rejected. register_as materializes the result as a new dataframe with a fresh TTL.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
     sql: z
       .string()
       .min(1)
+      .max(20_000)
       .describe(
-        'One SELECT against df_<id> tables named in a dataset field or by fdic_dataframe_describe.',
+        'One SELECT against df_<id> tables named in a dataset field or by fdic_dataframe_describe, up to 20,000 characters.',
       ),
     register_as: blankAsUnset(
       z
@@ -42,7 +43,7 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
         )
         .optional(),
     ).describe(
-      'Materialize the full result as a new dataframe under this unused name (df_XXXXX_XXXXX: uppercase letters and digits). A name already staged fails as register_as_clash — including on a repeat of a call that already saved it. Omit to return rows only.',
+      'Materialize the full result as a new dataframe under this unused name (df_XXXXX_XXXXX: uppercase letters and digits). A name already staged fails as register_as_clash — including on a repeat of a call that already saved it. The live dataframes share a 1,000,000-row budget: the oldest are dropped to make room, and a result over the budget on its own fails as register_as_too_large. Omit to return rows only.',
     ),
     preview: blankAsUnset(z.number().int().min(0).max(10_000).optional()).describe(
       'Rows to return inline (0–10,000); defaults to row_limit, and a value above row_limit is treated as row_limit. Set it low when register_as keeps the full result.',
@@ -98,9 +99,9 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
     {
       reason: 'missing_table',
       code: JsonRpcErrorCode.NotFound,
-      when: 'A table the SQL names is not staged — a df_ name that expired or is mistyped, or any other table name',
+      when: 'A table the SQL names is not staged — a df_ name that expired, was dropped to make room for newer dataframes, or is mistyped, or any other table name',
       recovery:
-        'Use fdic_dataframe_describe to list available dataframes, then re-run the producing tool if the table expired.',
+        'Re-run the tool that staged the dataframe to stage it again, or correct the name to one a dataset field returned.',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -108,7 +109,8 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
       reason: 'invalid_sql',
       code: JsonRpcErrorCode.ValidationError,
       when: 'A SELECT fails to parse or prepare (syntax error, unknown column or function, bad expression)',
-      recovery: 'Check column names and types against fdic_dataframe_describe and fix the SQL.',
+      recovery:
+        "Pass the table's name to fdic_dataframe_describe to check its column names and types, then fix the SQL.",
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -126,7 +128,7 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The statement is not a SELECT, or cannot be parsed as one',
       recovery:
-        'Send one read-only SELECT against df_ tables; list them with fdic_dataframe_describe.',
+        'Send one read-only SELECT against df_ tables named in a dataset field or by fdic_dataframe_describe.',
       severity: 'notice',
       thrownBy: 'service',
     },
@@ -144,7 +146,7 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL calls a file-reading or external-data table function such as read_csv or read_parquet',
       recovery:
-        'Remove the file-reading function and query only the df_ tables fdic_dataframe_describe lists.',
+        'Remove the file-reading function and query only df_ tables named in a dataset field or by fdic_dataframe_describe.',
       // Reaching past the staged tables: a modeled rejection, but worth an operator's eye.
       severity: 'warning',
       thrownBy: 'service',
@@ -162,7 +164,7 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
       reason: 'system_catalog_access',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL references a system catalog: information_schema, pg_catalog, sqlite_master, or a duckdb_*() function',
-      recovery: 'Query only df_ tables; list them with fdic_dataframe_describe.',
+      recovery: 'Query only df_ tables named in a dataset field or by fdic_dataframe_describe.',
       severity: 'warning',
       thrownBy: 'service',
     },
@@ -171,6 +173,15 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'register_as names a dataframe that is already staged',
       recovery: 'Choose an unused df_XXXXX_XXXXX name for register_as, or omit it.',
+      severity: 'notice',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'register_as_too_large',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The register_as result holds more rows than the staging budget (1,000,000 rows) allows on its own',
+      recovery:
+        'Aggregate or filter the SQL so the result is smaller, or omit register_as and read the rows inline.',
       severity: 'notice',
       thrownBy: 'service',
     },

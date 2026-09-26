@@ -205,10 +205,22 @@ describe('requests', () => {
       { name: "First Republic Bank's" },
       { filters: 'NAME:*FIRST* AND NAME:*REPUBLIC* AND NAME:*BANK* AND RESTYPE:"FAILURE"' },
     ],
+    [
+      'a name ending in a standalone NA, without it',
+      { name: 'Park West Bank, NA' },
+      { filters: 'NAME:*PARK* AND NAME:*WEST* AND NAME:*BANK* AND RESTYPE:"FAILURE"' },
+    ],
   ])('sends %s', async (_label, input, expected) => {
     withSearch();
     await handle(input);
     expect(paramsOf(isRows)).toMatchObject(expected);
+  });
+
+  it('sends no asset bound for min_assets 0, which would also drop events with no recorded assets', async () => {
+    withSearch();
+    await handle({ min_assets: 0 });
+    expect(paramsOf(isRows).filters).toBe('RESTYPE:"FAILURE"');
+    expect(paramsOf(isMissing('RESTYPE1')).filters).toBe('RESTYPE:"FAILURE" AND !(_exists_:COST)');
   });
 
   it('sends no filter at all for resolution all with nothing else set', async () => {
@@ -743,6 +755,27 @@ describe('errors', () => {
     expect(error.data?.recovery?.hint).toBe(hint);
     expect(text).toContain(`reason ${reason}`);
     expect(fake.requests).toHaveLength(0);
+  });
+
+  it('rejects a name over 100 characters at the schema, naming the limit, before any request', async () => {
+    const { result, text } = await run({ name: 'bank '.repeat(600).trim() });
+    const error = toolError(result);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'invalid_arguments' },
+    });
+    expect(error.message).toContain('name');
+    expect(error.message).toContain('<=100 characters');
+    expect(text).toContain('<=100 characters');
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it('accepts a name at the 100-character bound', async () => {
+    withSearch();
+    const name = 'ab '.repeat(34).slice(0, 100);
+    const { result } = await run({ name });
+    expect(result.isError).toBeFalsy();
+    expect(paramsOf(isRows).filters).toContain('NAME:*AB*');
   });
 
   it('accepts a leap day and a one-day window', async () => {

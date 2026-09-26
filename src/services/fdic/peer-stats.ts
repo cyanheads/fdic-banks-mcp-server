@@ -35,7 +35,7 @@ export function quantile(sorted: readonly number[], p: number): number {
  * be excluded; the institution itself must not be among the peers.
  */
 export function computePeerStats(value: number | null, peerValues: readonly number[]): PeerStats {
-  const sorted = [...peerValues].sort((a, b) => a - b);
+  const sorted = peerValues.toSorted((a, b) => a - b);
   const n = sorted.length;
   if (n === 0) {
     return {

@@ -1,15 +1,35 @@
 /**
- * @fileoverview Tests for the format() helpers: inline flattening of upstream text,
- * table-cell escaping, and unit-aware number rendering.
+ * @fileoverview Tests for the format() helpers: inline flattening of upstream text
+ * at every line break, line splitting, table-cell escaping, and unit-aware number
+ * rendering.
  * @module tests/tools/markdown.test
  */
 
 import { describe, expect, it } from 'vitest';
-import { cell, inline, metricValue, num } from '@/mcp-server/tools/markdown.js';
+import { cell, inline, metricValue, num, splitLines } from '@/mcp-server/tools/markdown.js';
 
 describe('markdown helpers', () => {
   it('flattens CR, LF, and CRLF to a space at inline slots', () => {
     expect(inline('A\r\nB\nC\rD')).toBe('A B C D');
+  });
+
+  it('flattens the other line breaks — VT, FF, NEL, LS, PS — to a space at inline slots', () => {
+    expect(inline('A\vB\fC\u0085D\u{2028}E\u{2029}F')).toBe('A B C D E F');
+    expect(cell('A|B\u{2028}C')).toBe('A\\|B C');
+  });
+
+  it('splits multi-line text at every line break, CRLF counting once', () => {
+    expect(splitLines('A\r\nB\nC\rD\vE\fF\u0085G\u{2028}H\u{2029}I')).toEqual([
+      'A',
+      'B',
+      'C',
+      'D',
+      'E',
+      'F',
+      'G',
+      'H',
+      'I',
+    ]);
   });
 
   it('flattens and escapes pipes in table cells', () => {

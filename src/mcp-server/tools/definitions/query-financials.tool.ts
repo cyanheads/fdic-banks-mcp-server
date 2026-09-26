@@ -23,7 +23,9 @@ import {
   planPanelQuarters,
 } from '@/services/fdic/fdic-service.js';
 import {
+  METRIC_BASES,
   METRIC_CATALOG,
+  METRIC_UNITS,
   type MetricName,
   metricDefinitions,
   resolveMetrics,
@@ -38,11 +40,9 @@ const MetricDefinitionSchema = z
   .object({
     metric: z.string().describe("Catalog metric name, the key it has in each row's values."),
     field: z.string().describe('FDIC Call Report field code the metric maps to, e.g. ROAQ.'),
-    unit: z
-      .enum(['usd_thousands', 'percent', 'count'])
-      .describe('usd_thousands, percent (1.71 = 1.71%), or count.'),
+    unit: z.enum(METRIC_UNITS).describe('usd_thousands, percent (1.71 = 1.71%), or count.'),
     basis: z
-      .enum(['point_in_time', 'quarter', 'quarter_annualized', 'year_to_date', 'ytd_annualized'])
+      .enum(METRIC_BASES)
       .describe(
         'point_in_time = balance at quarter end; quarter = that quarter alone; quarter_annualized = ratio from the quarter, annualized; year_to_date = accumulated since January 1; ytd_annualized = ratio from the year-to-date flow, annualized.',
       ),
@@ -118,7 +118,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       'Earliest quarter: a quarter-end date (2024-03-31), the same without dashes, or a quarter label (2024Q1). Omit for to_date alone.',
     ),
     to_date: reportDateInput(
-      'Latest quarter, in the same forms as from_date. Omit for the latest published quarter.',
+      'Latest quarter, in the same forms as from_date. Omit for the latest published quarter; beside from_date, a later quarter is cut back to it.',
     ),
     sort_by: blankAsUnset(metricEnum.optional()).describe(
       'Metric to order the preview (and the staged table) by; added to metrics when absent. Omit to order by newest quarter, then CERT.',
@@ -135,7 +135,11 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
     report_dates: z
       .object({
         from: z.string().describe('Earliest quarter-end covered (YYYY-MM-DD).'),
-        to: z.string().describe('Latest quarter-end covered (YYYY-MM-DD).'),
+        to: z
+          .string()
+          .describe(
+            'Latest quarter-end covered (YYYY-MM-DD), never past the latest published quarter.',
+          ),
       })
       .describe('Quarter range as applied.'),
     report_dates_defaulted: z
@@ -211,7 +215,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'from_date is after to_date, or after the latest published quarter when to_date is omitted',
+      when: 'from_date is after to_date, or the requested quarters (from_date, or to_date alone) start after the latest published quarter',
       recovery: 'Set from_date on or before to_date, or omit one of them.',
       severity: 'notice',
     },
@@ -306,10 +310,12 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       ]),
     ];
     const certs = input.certs?.length ? [...new Set(input.certs)] : undefined;
+    // A minimum of 0 bounds nothing; a form client sends it for an untouched field.
+    const minAssets = input.min_assets || undefined;
     const filters: PanelFilters = {
       ...(certs ? { certs } : {}),
       ...(state ? { state } : {}),
-      ...(input.min_assets !== undefined ? { minAssets: input.min_assets } : {}),
+      ...(minAssets !== undefined ? { minAssets } : {}),
       ...(input.max_assets !== undefined ? { maxAssets: input.max_assets } : {}),
       ...(metricFilters.length ? { metricFilters } : {}),
     };
@@ -317,19 +323,29 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
     const service = getFdicService();
     const budget = callBudget(PANEL_BUDGET_MS);
     const defaulted = fromInput === undefined && toInput === undefined;
-    const to = toInput ?? (await service.latestReportDate(ctx, budget)).reportDate;
-    const from = fromInput ?? to;
-    if (from > to) {
+    const latest = (await service.latestReportDate(ctx, budget)).reportDate;
+    // to_date alone is a one-quarter panel, so it opens the window when from_date is omitted.
+    const start = fromInput ?? toInput ?? latest;
+    if (start > latest) {
+      const field = fromInput === undefined ? 'to_date' : 'from_date';
+      // Omitting from_date alone would leave a to_date alone that fails the same way.
+      const omit = fromInput !== undefined && toInput !== undefined ? 'omit both dates' : 'omit it';
       throw ctx.fail(
         'invalid_date_range',
-        `from_date ${from} is after ${to}, the latest published quarter.`,
+        `${field} ${start} is after ${latest}, the latest published quarter.`,
         {
           recovery: {
-            hint: `Set from_date on or before ${to} (the latest published quarter), or omit it.`,
+            hint: `Set ${field} on or before ${latest} (the latest published quarter), or ${omit}.`,
           },
         },
       );
     }
+    const clamped = toInput !== undefined && toInput > latest;
+    const to = clamped || toInput === undefined ? latest : toInput;
+    const from = fromInput ?? to;
+    const clampNote = clamped
+      ? `to_date ${toInput} is after the latest published quarter, so the panel ends at ${latest}.`
+      : undefined;
 
     const panelMaxRows = getServerConfig().panelMaxRows;
     const preflight = await service.panelQuarterCounts(filters, from, to, ctx, budget);
@@ -375,6 +391,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
 
     if (preflight.total === 0) {
       const fragments: string[] = [];
+      if (clampNote) fragments.push(clampNote);
       if (defaulted) {
         fragments.push(
           `Only the latest published quarter (${to}) was searched; set from_date to cover earlier quarters.`,
@@ -385,7 +402,8 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
           "Metric thresholds are in each metric's unit — percentages for ratios (3 = 3%), thousands of dollars for amounts; fdic_list_reference with topic metrics lists each unit. Capital ratios are null for filers that do not report them.",
         );
       }
-      if (input.min_assets !== undefined || input.max_assets !== undefined) {
+      const assetBounded = minAssets !== undefined || input.max_assets !== undefined;
+      if (assetBounded) {
         fragments.push('Asset bounds are in thousands of dollars (1000000 = $1 billion).');
       }
       if (state) {
@@ -394,15 +412,18 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
         );
       }
       if (certs) {
+        const narrowedBeyondCerts = state !== undefined || assetBounded || metricFilters.length > 0;
         fragments.push(
-          'None of these CERTs filed for the requested quarters; check them with fdic_search_institutions.',
+          narrowedBeyondCerts
+            ? 'These CERTs may also have filed for none of the requested quarters; check them with fdic_search_institutions.'
+            : 'None of these CERTs filed for the requested quarters; check them with fdic_search_institutions.',
         );
       }
       ctx.enrich.notice(
         fragments.length ? fragments.join(' ') : 'No Call Report rows matched these filters.',
       );
     } else {
-      const notes: string[] = [];
+      const notes: string[] = clampNote ? [clampNote] : [];
       if (panel.length > preview.length) {
         notes.push(`Showing ${preview.length} of ${panel.length} fetched rows.`);
       }

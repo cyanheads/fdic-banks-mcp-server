@@ -3,8 +3,9 @@
  * canvas: canvas_unavailable, the zero-row page, preview- and row_limit-bound
  * pages, preview clamped to row_limit, register_as with an exact count, every
  * SQL rejection rethrown under this tool's reason with its contract recovery,
- * register_as_clash on one tenant's state, blank and malformed inputs, and
- * result values in both structuredContent and the rendered table.
+ * register_as_clash on one tenant's state, register_as_too_large past the
+ * staging budget, blank and malformed inputs, and result values in both
+ * structuredContent and the rendered table.
  * @module tests/tools/dataframe-query.tool.test
  */
 
@@ -201,6 +202,33 @@ describe('SQL rejections', () => {
       data: { reason, recovery: { hint: contractRecovery(tool, reason) } },
     });
     expect(text).toContain(`reason ${reason}`);
+    expect(text).toContain(contractRecovery(tool, reason));
+  });
+
+  it('says a missing df_ table may have been dropped to make room, on both surfaces', async () => {
+    const { result, text } = await run({ sql: 'SELECT * FROM df_AB12C_3DE45' });
+    const error = toolError(result);
+    expect(error.data?.reason).toBe('missing_table');
+    expect(error.message).toContain('dropped to make room for newer dataframes');
+    expect(text).toContain('dropped to make room for newer dataframes');
+  });
+
+  it('refuses a register_as result larger than the staging budget as register_as_too_large, on both surfaces', async () => {
+    initCanvasBridge(duck, { maxStagedRows: 4 });
+    const { result, text } = await run({ sql: FIVE_ROWS, register_as: 'df_AB12C_3DE45' });
+    expect(toolError(result)).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('5 rows'),
+      data: {
+        reason: 'register_as_too_large',
+        rowCount: 5,
+        maxStagedRows: 4,
+        recovery: { hint: contractRecovery(tool, 'register_as_too_large') },
+      },
+    });
+    expect(text).toContain('reason register_as_too_large');
+    expect(text).toContain('5 rows');
+    expect(text).toContain(contractRecovery(tool, 'register_as_too_large'));
   });
 
   it('refuses register_as naming a staged dataframe as register_as_clash', async () => {
@@ -228,6 +256,7 @@ describe('SQL rejections', () => {
 
   it.each<[string, Record<string, unknown>]>([
     ['an empty statement', { sql: '' }],
+    ['sql over 20,000 characters', { sql: `SELECT 1 AS n -- ${'x'.repeat(20_000)}` }],
     ['a lowercase register_as', { sql: 'SELECT 1', register_as: 'df_ab12c_3de45' }],
     ['an uppercase DF_ prefix', { sql: 'SELECT 1', register_as: 'DF_AB12C_3DE45' }],
     ['a short register_as', { sql: 'SELECT 1', register_as: 'df_AB12C' }],
@@ -241,5 +270,15 @@ describe('SQL rejections', () => {
       code: JsonRpcErrorCode.InvalidParams,
       data: { reason: 'invalid_arguments' },
     });
+  });
+
+  it('runs sql of exactly 20,000 characters and names the cap on one more, on both surfaces', async () => {
+    const sqlOf = (length: number) => `SELECT 1 AS n -- ${'x'.repeat(length - 17)}`;
+    expect(sqlOf(20_000)).toHaveLength(20_000);
+    expect(structured<Output>((await run({ sql: sqlOf(20_000) })).result).rows).toEqual([{ n: 1 }]);
+
+    const { result, text } = await run({ sql: sqlOf(20_001) });
+    expect(toolError(result).message).toMatch(/20000/);
+    expect(text).toMatch(/20000/);
   });
 });

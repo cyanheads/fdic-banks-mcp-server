@@ -7,7 +7,12 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { callBudget, getFdicService } from '@/services/fdic/fdic-service.js';
-import { metricDefinitions, resolveMetrics } from '@/services/fdic/metric-catalog.js';
+import {
+  METRIC_BASES,
+  METRIC_UNITS,
+  metricDefinitions,
+  resolveMetrics,
+} from '@/services/fdic/metric-catalog.js';
 import { reportDateToIso } from '@/services/fdic/query-builder.js';
 import { blankAsUnset, metricEnum, reportDateInput } from '../input-schemas.js';
 import { cell, inline, metricValue, num } from '../markdown.js';
@@ -16,11 +21,9 @@ const MetricDefinitionSchema = z
   .object({
     metric: z.string().describe("Catalog metric name, the key it has in each row's values."),
     field: z.string().describe('FDIC Call Report field code the metric maps to, e.g. ROAQ.'),
-    unit: z
-      .enum(['usd_thousands', 'percent', 'count'])
-      .describe('usd_thousands, percent (1.71 = 1.71%), or count.'),
+    unit: z.enum(METRIC_UNITS).describe('usd_thousands, percent (1.71 = 1.71%), or count.'),
     basis: z
-      .enum(['point_in_time', 'quarter', 'quarter_annualized', 'year_to_date', 'ytd_annualized'])
+      .enum(METRIC_BASES)
       .describe(
         'point_in_time = balance at quarter end; quarter = that quarter alone; quarter_annualized = ratio from the quarter, annualized; year_to_date = accumulated since January 1; ytd_annualized = ratio from the year-to-date flow, annualized.',
       ),

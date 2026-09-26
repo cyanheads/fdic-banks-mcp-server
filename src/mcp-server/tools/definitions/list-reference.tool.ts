@@ -11,7 +11,13 @@ import { BANK_CLASS_CODES, BANK_CLASSES } from '@/services/fdic/bank-classes.js'
 import { COVERAGE } from '@/services/fdic/coverage.js';
 import { FAILURE_METHOD_CODES, FAILURE_METHODS } from '@/services/fdic/failure-methods.js';
 import { INSURANCE_FUNDS } from '@/services/fdic/insurance-funds.js';
-import { isDefaultMetric, METRIC_CATALOG, METRIC_NAMES } from '@/services/fdic/metric-catalog.js';
+import {
+  isDefaultMetric,
+  METRIC_BASES,
+  METRIC_CATALOG,
+  METRIC_NAMES,
+  METRIC_UNITS,
+} from '@/services/fdic/metric-catalog.js';
 import { inline, num } from '../markdown.js';
 
 const TOPICS = [
@@ -38,11 +44,11 @@ const EntrySchema = z
       .optional()
       .describe('FDIC Call Report field code the metric maps to, e.g. ROAQ (metrics).'),
     unit: z
-      .enum(['usd_thousands', 'percent', 'count'])
+      .enum(METRIC_UNITS)
       .optional()
       .describe('Unit of the metric: usd_thousands, percent (1.71 = 1.71%), or count (metrics).'),
     basis: z
-      .enum(['point_in_time', 'quarter', 'quarter_annualized', 'year_to_date', 'ytd_annualized'])
+      .enum(METRIC_BASES)
       .optional()
       .describe(
         'point_in_time = balance at quarter end; quarter = that quarter alone; quarter_annualized = ratio from the quarter, annualized; year_to_date = accumulated since January 1; ytd_annualized = ratio from the year-to-date flow, annualized (metrics).',

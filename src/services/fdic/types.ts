@@ -91,7 +91,7 @@ export interface FailureFilters {
   from?: string;
   methods?: readonly FailureMethodCode[];
   minAssets?: number;
-  /** Tokens from `failureNameTokens`. */
+  /** Tokens from `nameTokens`. */
   nameTokens?: readonly string[];
   resolution: 'failure' | 'assistance' | 'all';
   state?: StateCode;

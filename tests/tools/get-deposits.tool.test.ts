@@ -2,7 +2,8 @@
  * @fileoverview Tests for fdic_get_deposits over a faked FDIC transport and the
  * DataCanvas boundary: the three modes (an institution's branches and per-state
  * share, a geography's market ranked with HHI, one institution's position in a
- * market), geography clauses and case variants, the latest-survey default and
+ * market), geography clauses and case variants, the city and county length
+ * bounds and the msa_code pattern, the latest-survey default and
  * year_not_available, branch paging past 10,000 rows, market names from the
  * preview lookup or the paged CERT directory, staging on a real DuckDB canvas,
  * the canvas-off path, a staging failure and a cancelled staging call, both
@@ -395,8 +396,18 @@ describe('market mode', () => {
       { state: 'MO', city: 'st. louis' },
       'STALPBR:"MO" AND CITYBR:("st. louis" OR "St. Louis")',
     ],
+    [
+      'a hyphenated city with its spaced spelling',
+      { state: 'NC', city: 'winston-salem' },
+      'STALPBR:"NC" AND CITYBR:("winston-salem" OR "Winston-Salem" OR "Winston Salem")',
+    ],
+    [
+      'a possessive county in each apostrophe spelling',
+      { state: 'MD', county: "prince george's" },
+      `STALPBR:"MD" AND CNTYNAMB:("prince george's" OR "Prince George's" OR "Prince George'S" OR "Prince George S" OR "Prince Georges")`,
+    ],
     ['a ZIP with a leading zero, as a string', { zip: '02110' }, 'ZIPBR:"02110"'],
-    ['an MSA code, as a number without leading zeros', { msa_code: '04260' }, 'MSABR:4260'],
+    ['an MSA code, as a number', { msa_code: '42660' }, 'MSABR:42660'],
   ])('filters the market on %s', async (_label, input, clause) => {
     withLatestYear();
     withMarket([]);
@@ -617,6 +628,64 @@ describe('inputs', () => {
     });
     expect(fake.requests).toHaveLength(0);
   });
+
+  it.each([
+    ['00000', "FDIC's value for a non-metropolitan branch"],
+    ['04260', 'a code with a leading zero, which no CBSA has'],
+  ])(
+    'rejects msa_code %s (%s) at the schema, naming the code range, before any request',
+    async (msaCode) => {
+      const { result, text } = await run({ msa_code: msaCode });
+      const error = toolError(result);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'invalid_arguments' },
+      });
+      expect(error.message).toContain('msa_code');
+      expect(error.message).toContain('10180–49740');
+      expect(text).toContain('10180–49740');
+      expect(fake.requests).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ['city', { state: 'WA', city: 'x'.repeat(51) }],
+    ['county', { state: 'WA', county: 'x'.repeat(51) }],
+  ])(
+    'rejects a %s over 50 characters at the schema, naming the limit, before any request',
+    async (field, input) => {
+      const { result, text } = await run(input);
+      const error = toolError(result);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'invalid_arguments' },
+      });
+      expect(error.message).toContain(field);
+      expect(error.message).toContain('<=50 characters');
+      expect(text).toContain('<=50 characters');
+      expect(fake.requests).toHaveLength(0);
+    },
+  );
+
+  it('accepts a city and a county at the 50-character bound', async () => {
+    withLatestYear();
+    withMarket([]);
+    const city = 'y'.repeat(50);
+    const county = 'z'.repeat(50);
+    const { result } = await run({ state: 'WA', city, county });
+    expect(result.isError).toBeFalsy();
+    expect(requestsWhere('sod', isMarket)[0]?.filters).toContain(`CITYBR:("${city}" OR `);
+  });
+
+  it('advertises the city and county bounds and the msa_code pattern in the input schema', () => {
+    const shape = tool.input.shape;
+    expect(shape.city.safeParse('y'.repeat(50)).success).toBe(true);
+    expect(shape.city.safeParse('y'.repeat(51)).success).toBe(false);
+    expect(shape.county.safeParse('z'.repeat(50)).success).toBe(true);
+    expect(shape.county.safeParse('z'.repeat(51)).success).toBe(false);
+    expect(shape.msa_code.safeParse('10180').success).toBe(true);
+    expect(shape.msa_code.safeParse('00000').success).toBe(false);
+  });
 });
 
 describe('staging', () => {
@@ -803,9 +872,10 @@ describe('both surfaces through the production contract', () => {
       dataset: { row_count: 5 },
     });
     const name = output.dataset?.name ?? '';
-    expect(output.notice).toContain(name);
+    const pointer = `use fdic_dataframe_describe with name ${name} to inspect its columns`;
+    expect(output.notice).toContain(pointer);
     expect(text).toContain(`**Staged:** ${name} — 5 rows`);
-    expect(text).toMatch(new RegExp(`^> .*${name}`, 'm'));
+    expect(text).toMatch(new RegExp(`^> .*${pointer}`, 'm'));
   });
 
   it('validates an under-cap partial branch page with the canvas off, pointing at no dataframe tool', async () => {
@@ -922,15 +992,20 @@ describe('errors', () => {
     withLatestYear();
     withBranches([MAIN_OFFICE_BRANCH]);
     withStateMarkets();
-    const { result } = await run({ cert: CERT });
-    expect(toolError(result)).toMatchObject({
+    const { result, text } = await run({ cert: CERT });
+    const error = toolError(result);
+    const wait = `${error.data?.retryAfter} seconds`;
+    expect(error).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
       data: {
         reason: 'pacer_shed',
         retryable: true,
-        recovery: { hint: contractRecovery(tool, 'pacer_shed') },
+        recovery: {
+          hint: contractRecovery(tool, 'pacer_shed').replace('retryAfter seconds', wait),
+        },
       },
     });
+    expect(text).toContain(`wait ${wait} and call again`);
   });
 
   it('reports an exhausted FDIC 429 as upstream_rate_limited', async () => {
@@ -947,7 +1022,12 @@ describe('errors', () => {
       data: {
         reason: 'upstream_rate_limited',
         retryAfter: 30,
-        recovery: { hint: contractRecovery(tool, 'upstream_rate_limited') },
+        recovery: {
+          hint: contractRecovery(tool, 'upstream_rate_limited').replace(
+            'retryAfter seconds',
+            '30 seconds',
+          ),
+        },
       },
     });
   });

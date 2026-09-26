@@ -12,10 +12,11 @@ import {
   caseVariants,
   containsAllTokens,
   eq,
-  failureNameTokens,
   isCalendarDate,
   isoToRepdte,
+  nameTokens,
   normalizeInstitutionName,
+  not,
   notExists,
   quote,
   REPORT_DATE_PATTERN,
@@ -56,6 +57,13 @@ describe('clauses', () => {
     expect(and(eq('CERT', 1), undefined, notExists('COST'))).toBe('CERT:1 AND !(_exists_:COST)');
     expect(and(undefined, undefined)).toBeUndefined();
   });
+
+  it('negates a whole clause, compound or not', () => {
+    expect(not(eq('ACTIVE', 1))).toBe('!(ACTIVE:1)');
+    expect(not(and(eq('ACTIVE', 1), containsAllTokens('NAME', ['HARBOR']))!)).toBe(
+      '!(ACTIVE:1 AND NAME:*HARBOR*)',
+    );
+  });
 });
 
 describe('case handling', () => {
@@ -68,6 +76,27 @@ describe('case handling', () => {
     expect(caseVariants('st.   louis')).toEqual(['st. louis', 'St. Louis']);
     expect(caseVariants('  Seattle ')).toEqual(['Seattle']);
   });
+
+  it.each([
+    ['Winston-Salem', ['Winston-Salem', 'Winston Salem']],
+    ['winston salem', ['winston salem', 'Winston Salem', 'Winston-Salem']],
+    ['Walla Walla', ['Walla Walla', 'Walla-Walla']],
+    [
+      "coeur d'alene",
+      ["coeur d'alene", "Coeur D'alene", "Coeur D'Alene", 'Coeur D Alene', 'Coeur Dalene'],
+    ],
+    [
+      "lee's summit",
+      ["lee's summit", "Lee's Summit", "Lee'S Summit", 'Lee S Summit', 'Lees Summit'],
+    ],
+    [
+      "Prince George's",
+      ["Prince George's", "Prince George'S", 'Prince George S', 'Prince Georges'],
+    ],
+    ["Land O' Lakes", ["Land O' Lakes", 'Land O Lakes']],
+  ])('adds the spellings FDIC records a place under for %j', (value, variants) => {
+    expect(caseVariants(value)).toEqual(variants);
+  });
 });
 
 describe('names', () => {
@@ -75,12 +104,34 @@ describe('names', () => {
     expect(normalizeInstitutionName('Evergreen <Harbor> "Bank"; OR *')).toBe(
       'Evergreen Harbor Bank OR',
     );
-    expect(normalizeInstitutionName("Farmers & Merchants' Bank, N.A.")).toBe(
-      "Farmers & Merchants' Bank, N.A.",
-    );
+    expect(normalizeInstitutionName("Farmers & Merchants' Bank")).toBe("Farmers & Merchants' Bank");
     expect(normalizeInstitutionName('Banco Popular de Puerto Rico')).toBe(
       'Banco Popular de Puerto Rico',
     );
+  });
+
+  it.each([
+    ['Wells Fargo Bank, N.A.', 'Wells Fargo Bank'],
+    ["Farmers & Merchants' Bank, N.A.", "Farmers & Merchants' Bank"],
+    ['Bank of America NA', 'Bank of America'],
+    ['citibank n.a', 'citibank'],
+    ['American Bank of Texas, N. A. - Fredericksburg', 'American Bank of Texas, - Fredericksburg'],
+    ['First Bank,NA', 'First Bank'],
+    ['NA Bank NA', 'Bank'],
+  ])(
+    'drops a standalone N.A. from %j, since FDIC mostly spells out National Association',
+    (value, expected) => {
+      expect(normalizeInstitutionName(value)).toBe(expected);
+    },
+  );
+
+  it('keeps NA inside a word, the spelled-out form, and a name that is nothing but N.A.', () => {
+    expect(normalizeInstitutionName('Banana Bank')).toBe('Banana Bank');
+    expect(normalizeInstitutionName('NAB Bank')).toBe('NAB Bank');
+    expect(normalizeInstitutionName('Bank, National Association')).toBe(
+      'Bank, National Association',
+    );
+    expect(normalizeInstitutionName('N.A.')).toBe('N.A.');
   });
 
   it('returns undefined when no letter or digit survives', () => {
@@ -88,12 +139,32 @@ describe('names', () => {
     expect(normalizeInstitutionName('& - .')).toBeUndefined();
   });
 
-  it('tokenizes failure names uppercase, dropping one-character tokens', () => {
-    expect(failureNameTokens("First Republic Bank's")).toEqual(['FIRST', 'REPUBLIC', 'BANK']);
-    expect(failureNameTokens('a b !')).toEqual([]);
+  it('tokenizes names uppercase, dropping one-character tokens', () => {
+    expect(nameTokens("First Republic Bank's")).toEqual(['FIRST', 'REPUBLIC', 'BANK']);
+    expect(nameTokens('a b !')).toEqual([]);
     expect(containsAllTokens('NAME', ['SILICON', 'VALLEY'])).toBe(
       'NAME:*SILICON* AND NAME:*VALLEY*',
     );
+  });
+
+  it.each([
+    ['Park West Bank, NA', ['PARK', 'WEST', 'BANK']],
+    ['park west bank na', ['PARK', 'WEST', 'BANK']],
+    ['NA Bank', ['BANK']],
+    ['Park West Bank, N.A.', ['PARK', 'WEST', 'BANK']],
+    ['Park West Bank, N. A.', ['PARK', 'WEST', 'BANK']],
+  ])(
+    'drops a standalone NA from %j when another token remains, so it also matches N.A.',
+    (value, tokens) => {
+      expect(nameTokens(value)).toEqual(tokens);
+    },
+  );
+
+  it('keeps NA when it is the only token, and NA inside a word', () => {
+    expect(nameTokens('NA')).toEqual(['NA']);
+    expect(nameTokens('N.A. NA')).toEqual(['NA']);
+    expect(nameTokens('National Bank')).toEqual(['NATIONAL', 'BANK']);
+    expect(nameTokens('Banner Bank')).toEqual(['BANNER', 'BANK']);
   });
 });
 

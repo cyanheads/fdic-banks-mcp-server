@@ -1,14 +1,26 @@
 /**
  * @fileoverview Markdown rendering helpers for format(): flatten upstream free text
- * at inline slots, escape table cells, and render numbers with units.
+ * at inline slots, split multi-line text, escape table cells, and render numbers
+ * with units.
  * @module mcp-server/tools/markdown
  */
 
 import type { MetricUnit } from '@/services/fdic/metric-catalog.js';
 
-/** Upstream text at an inline slot (heading, bold label, list item): CR/LF flattened to a space. */
+/**
+ * Every Unicode line break: CRLF as one, then LF, VT, FF, CR, NEL, LS, and PS. A reader
+ * that sees any of them as a new line would otherwise see text leave its slot.
+ */
+const LINE_BREAK = /\r\n|[\n\v\f\r\u0085\u{2028}\u{2029}]/gu;
+
+/** Upstream text at an inline slot (heading, bold label, list item): line breaks flattened to a space. */
 export function inline(text: string): string {
-  return text.replace(/\r\n|\r|\n/g, ' ');
+  return text.replace(LINE_BREAK, ' ');
+}
+
+/** Multi-line text split at every line break, for a renderer that prefixes each line. */
+export function splitLines(text: string): string[] {
+  return text.split(LINE_BREAK);
 }
 
 /** Upstream text in a table cell: flattened, with pipes escaped. */

@@ -3,7 +3,8 @@
  * transport: the Summary of Deposits lookups (latest survey year, branch pages
  * past 10,000 rows, market and state aggregations, CERT→name lookups and the
  * paged directory) and the financial panel (quarter planning under the row cap,
- * the aggregation preflight, and per-quarter CERT-ordered paging).
+ * the aggregation preflight, contiguous quarters fetched in runs of one page, and
+ * CERT-ordered paging of a quarter larger than a page).
  * @module tests/services/fdic/fdic-service-deposits-panel.test
  */
 
@@ -22,7 +23,14 @@ import {
   RURAL_BRANCH,
   sodBranch,
 } from '../../fixtures/fdic-records.js';
-import { aggEnvelope, envelope, FakeFdic, type FakeRequest } from '../../helpers/fake-fdic.js';
+import {
+  aggEnvelope,
+  envelope,
+  FakeFdic,
+  type FakeRequest,
+  quarterEnds,
+  requestedQuarters,
+} from '../../helpers/fake-fdic.js';
 
 const BRANCH_FIELDS =
   'CERT,NAMEFULL,BRNUM,UNINUMBR,NAMEBR,BKMO,ADDRESBR,CITYBR,CNTYNAMB,STALPBR,ZIPBR,MSABR,MSANAMB,DEPSUMBR,SIMS_ESTABLISHED_DATE,SIMS_LATITUDE,SIMS_LONGITUDE';
@@ -356,8 +364,125 @@ describe('panel preflight', () => {
 
 describe('panel pages', () => {
   const identity = { NAME: 'BANK', STALP: 'WA' };
-  const quarterOf = (request: FakeRequest) =>
-    /REPDTE:"(\d{8})"/.exec(request.params.filters ?? '')?.[1];
+  const iso = (repdte: string) => `${repdte.slice(0, 4)}-${repdte.slice(4, 6)}-${repdte.slice(6)}`;
+
+  /**
+   * Serves generated rows (CERTs 1..count per quarter) for whichever quarters the
+   * request selects, a single quarter or a range, in CERT order by offset and limit.
+   */
+  function servePanel(counts: Record<string, number>) {
+    return (request: FakeRequest) => {
+      const selected = requestedQuarters(request.params.filters, Object.keys(counts));
+      const rows = selected
+        .flatMap((repdte) =>
+          Array.from({ length: counts[repdte] ?? 0 }, (_, i) =>
+            panelRow(i + 1, repdte, identity, { ASSET: i + 1 }),
+          ),
+        )
+        .sort((a, b) => Number(a.CERT) - Number(b.CERT));
+      const offset = Number(request.params.offset);
+      const limit = Number(request.params.limit);
+      return envelope('financials', rows.slice(offset, offset + limit), { total: rows.length });
+    };
+  }
+
+  it('fetches a 40-quarter panel that fits one page in one request, dating each row by its REPDTE', async () => {
+    const repdtes = quarterEnds(40);
+    const fake = new FakeFdic().on(
+      'financials',
+      () => true,
+      servePanel(Object.fromEntries(repdtes.map((repdte) => [repdte, 1]))),
+    );
+    const plan = repdtes.map((repdte) => ({ reportDate: iso(repdte), rows: 1 }));
+    const panel = await serviceOver(fake).getPanelRows(
+      { certs: [1] },
+      plan,
+      ['total_assets'],
+      panelCtx(),
+      callBudget(),
+    );
+    expect(fake.requests.map((r) => r.params)).toEqual([
+      {
+        filters: 'CERT:1 AND REPDTE:[20160930 TO 20260630]',
+        fields: 'CERT,NAME,STALP,REPDTE,ASSET',
+        sort_by: 'CERT',
+        sort_order: 'ASC',
+        limit: '40',
+        offset: '0',
+      },
+    ]);
+    expect(panel).toHaveLength(40);
+    expect(new Set(panel.map((row) => row.report_date))).toEqual(
+      new Set(plan.map((q) => q.reportDate)),
+    );
+    expect(panel.every((row) => row.cert === 1 && row.values.total_assets === 1)).toBe(true);
+  });
+
+  it('splits the plan into contiguous runs of at most one page, paging a quarter that alone exceeds one', async () => {
+    const [q1, q2, q3, q4, q5, q6] = quarterEnds(6) as [
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+    ];
+    // Newest first, as the plan runs; an object keyed by YYYYMMDD would iterate oldest first.
+    const sizes: [string, number][] = [
+      [q1, 6000],
+      [q2, 4000],
+      [q3, 2000],
+      [q4, 12_000],
+      [q5, 500],
+      [q6, 400],
+    ];
+    const counts = Object.fromEntries(sizes);
+    const fake = new FakeFdic().on('financials', () => true, servePanel(counts));
+    const panel = await serviceOver(fake).getPanelRows(
+      {},
+      sizes.map(([repdte, rows]) => ({ reportDate: iso(repdte), rows })),
+      ['total_assets'],
+      panelCtx(),
+      callBudget(),
+    );
+    // Runs are fetched concurrently, so compare the requests as a set.
+    const sent = fake.requests.map(
+      (r) => `${r.params.filters} @${r.params.offset}+${r.params.limit}`,
+    );
+    expect(sent.sort()).toEqual(
+      [
+        `REPDTE:[${q2} TO ${q1}] @0+10000`,
+        `REPDTE:"${q3}" @0+2000`,
+        `REPDTE:"${q4}" @0+10000`,
+        `REPDTE:"${q4}" @10000+2000`,
+        `REPDTE:[${q6} TO ${q5}] @0+900`,
+      ].sort(),
+    );
+    expect(panel).toHaveLength(24_900);
+    const perQuarter = new Map<string, number>();
+    for (const row of panel) {
+      perQuarter.set(row.report_date, (perQuarter.get(row.report_date) ?? 0) + 1);
+    }
+    expect(Object.fromEntries(perQuarter)).toEqual(
+      Object.fromEntries(Object.entries(counts).map(([repdte, rows]) => [iso(repdte), rows])),
+    );
+  });
+
+  it('stops paging a quarter at a short page, below its planned row count', async () => {
+    const fake = new FakeFdic().on('financials', () => true, servePanel({ '20260630': 10_003 }));
+    const panel = await serviceOver(fake).getPanelRows(
+      {},
+      [{ reportDate: '2026-06-30', rows: 25_000 }],
+      ['total_assets'],
+      panelCtx(),
+      callBudget(),
+    );
+    expect(fake.requests.map((r) => [r.params.offset, r.params.limit])).toEqual([
+      ['0', '10000'],
+      ['10000', '10000'],
+    ]);
+    expect(panel).toHaveLength(10_003);
+  });
 
   it('pages each planned quarter by CERT, stopping at its planned row count', async () => {
     const rows = Array.from({ length: 10_010 }, (_, i) =>
@@ -407,18 +532,16 @@ describe('panel pages', () => {
     });
   });
 
-  it('stops a quarter early on a short page, skips rows without a CERT, and nulls unreported ratios', async () => {
-    const byQuarter: Record<string, Record<string, unknown>[]> = {
-      '20260630': [
-        panelRow(33990, '20260630', identity, { IDT1CER: 0 }),
-        { NAME: 'NO CERT', STALP: 'WA', REPDTE: '20260630', IDT1CER: 9 },
-      ],
-      '20260331': [panelRow(33990, '20260331', identity, { IDT1CER: 12.5 })],
-    };
+  it('ends a run at a short page, skips rows without a CERT or REPDTE, and nulls unreported ratios', async () => {
     const fake = new FakeFdic().on(
       'financials',
       () => true,
-      (request) => envelope('financials', byQuarter[quarterOf(request) ?? ''] ?? []),
+      envelope('financials', [
+        panelRow(33990, '20260630', identity, { IDT1CER: 0 }),
+        { NAME: 'NO CERT', STALP: 'WA', REPDTE: '20260630', IDT1CER: 9 },
+        { CERT: 57701, NAME: 'NO DATE', STALP: 'WA', IDT1CER: 9 },
+        panelRow(33990, '20260331', identity, { IDT1CER: 12.5 }),
+      ]),
     );
     const panel = await serviceOver(fake).getPanelRows(
       {},
@@ -430,10 +553,8 @@ describe('panel pages', () => {
       panelCtx(),
       callBudget(),
     );
-    expect(fake.requests).toHaveLength(2);
-    expect(fake.requests.map((r) => r.params.filters)).toEqual([
-      'REPDTE:"20260630"',
-      'REPDTE:"20260331"',
+    expect(fake.requests.map((r) => [r.params.filters, r.params.limit])).toEqual([
+      ['REPDTE:[20260331 TO 20260630]', '1000'],
     ]);
     expect(panel).toEqual([
       {

@@ -9,7 +9,12 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { ASSET_BAND_CODES, assetBand, assetBandFor } from '@/services/fdic/asset-bands.js';
 import { callBudget, getFdicService } from '@/services/fdic/fdic-service.js';
-import { METRIC_CATALOG, resolveMetrics } from '@/services/fdic/metric-catalog.js';
+import {
+  METRIC_BASES,
+  METRIC_CATALOG,
+  METRIC_UNITS,
+  resolveMetrics,
+} from '@/services/fdic/metric-catalog.js';
 import { computePeerStats } from '@/services/fdic/peer-stats.js';
 import { reportDateToIso } from '@/services/fdic/query-builder.js';
 import { normalizeState } from '@/services/fdic/us-states.js';
@@ -115,17 +120,9 @@ export const comparePeersTool = tool('fdic_compare_peers', {
             field: z
               .string()
               .describe('FDIC Call Report field code the metric maps to, e.g. ROAQ.'),
-            unit: z
-              .enum(['usd_thousands', 'percent', 'count'])
-              .describe('usd_thousands, percent (1.71 = 1.71%), or count.'),
+            unit: z.enum(METRIC_UNITS).describe('usd_thousands, percent (1.71 = 1.71%), or count.'),
             basis: z
-              .enum([
-                'point_in_time',
-                'quarter',
-                'quarter_annualized',
-                'year_to_date',
-                'ytd_annualized',
-              ])
+              .enum(METRIC_BASES)
               .describe(
                 'point_in_time = balance at quarter end; quarter = that quarter alone; quarter_annualized = ratio from the quarter, annualized; year_to_date = accumulated since January 1; ytd_annualized = ratio from the year-to-date flow, annualized.',
               ),

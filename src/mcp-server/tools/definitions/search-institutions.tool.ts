@@ -110,8 +110,8 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
-    name: blankAsUnset(z.string().optional()).describe(
-      'Institution name to match — current, former, or trade name, case-insensitive, every word required (e.g. "silicon valley"). Punctuation other than & \' . , - is ignored.',
+    name: blankAsUnset(z.string().max(100).optional()).describe(
+      'Institution name to match, up to 100 characters — current, former, or trade name, case-insensitive, every word required (e.g. "silicon valley"). Punctuation other than & \' . , - is ignored, and so is a standalone N.A. or NA, which then also matches "National Association".',
     ),
     certs: z
       .array(z.number().int().min(1).describe('FDIC certificate number.'))
@@ -123,8 +123,8 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
     state: stateInput(
       'Headquarters state: two-letter code in any case (wa) or full name (Washington); DC and territories accepted.',
     ),
-    city: blankAsUnset(z.string().optional()).describe(
-      'Headquarters city as FDIC spells it (e.g. Seattle, St. Louis); matched exactly, as given or in title case.',
+    city: blankAsUnset(z.string().max(50).optional()).describe(
+      "Headquarters city as FDIC spells it (e.g. Seattle, St. Louis), up to 50 characters; matched exactly, as given or in title case, with a hyphen, apostrophe, or space between words also tried the other ways FDIC records it (Winston-Salem finds Winston Salem, Coeur d'Alene finds Coeur D Alene).",
     ),
     status: blankAsUnset(z.enum(STATUSES).optional()).describe(
       'active, inactive (merged, failed, or closed), or any. Default: any when name or certs is given, otherwise active. The applied value is echoed as status_filter.',
@@ -152,7 +152,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
       "Holding company RSSD ID from any result's holding_company.rssd; lists the institutions under that top holder. With status any, former subsidiaries are included under the holder they had at closing.",
     ),
     sort: blankAsUnset(z.enum(['relevance', 'assets_desc', 'name']).optional()).describe(
-      'relevance (match score; default when name is given — without name it falls back to assets_desc), assets_desc (largest first; the default otherwise), or name (A–Z).',
+      'relevance (active institutions whose current name holds every word of name first, then every other match, each by match score; default when name is given — without name it falls back to assets_desc), assets_desc (largest first; the default otherwise), or name (A–Z).',
     ),
     limit: blankAsUnset(z.number().int().min(1).max(100).default(20)).describe(
       'Institutions per page (1–100).',
@@ -260,6 +260,8 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
 
     const certs = input.certs?.length ? [...new Set(input.certs)] : undefined;
     const bankClasses = input.bank_classes?.length ? input.bank_classes : undefined;
+    // A minimum of 0 bounds nothing; as a range clause it would also drop records with no recorded assets.
+    const minAssets = input.min_assets || undefined;
     const lookup = name !== undefined || certs !== undefined;
     const status: InstitutionStatus = input.status ?? (lookup ? 'any' : 'active');
     // Relevance needs a name to score against; without one it falls back to size order.
@@ -273,7 +275,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
       ...(input.city ? { city: input.city } : {}),
       status,
       ...(bankClasses ? { bankClasses } : {}),
-      ...(input.min_assets !== undefined ? { minAssets: input.min_assets } : {}),
+      ...(minAssets !== undefined ? { minAssets } : {}),
       ...(input.max_assets !== undefined ? { maxAssets: input.max_assets } : {}),
       ...(input.holding_company_rssd !== undefined
         ? { holdingCompanyRssd: input.holding_company_rssd }
@@ -291,7 +293,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
       input.city !== undefined ||
       status !== 'any' ||
       bankClasses !== undefined ||
-      input.min_assets !== undefined ||
+      minAssets !== undefined ||
       input.max_assets !== undefined ||
       input.holding_company_rssd !== undefined;
     const pageProvesExistence =
@@ -330,7 +332,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
           'City matching is exact as FDIC spells it (for example Seattle, St. Louis); drop city and filter by state to browse.',
         );
       }
-      if (input.min_assets !== undefined || input.max_assets !== undefined) {
+      if (minAssets !== undefined || input.max_assets !== undefined) {
         fragments.push('Asset bounds are in thousands of dollars (1000000 = $1 billion).');
       }
       ctx.enrich.notice(

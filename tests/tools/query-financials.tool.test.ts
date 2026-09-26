@@ -1,7 +1,10 @@
 /**
  * @fileoverview Tests for fdic_query_financials over a faked FDIC transport and
- * the DataCanvas boundary: the latest-quarter default and the report-date forms,
- * the aggregation preflight and per-quarter CERT-ordered paging, quarter
+ * the DataCanvas boundary: the latest-quarter lookup (the default, a window cut
+ * back to it, a window starting past it) and the report-date forms, a min_assets
+ * of 0 as no bound, zero-hit fragments that name only the causes the filters
+ * allow, the aggregation preflight, contiguous quarters fetched in one-page runs
+ * and CERT-ordered paging of a quarter larger than a page, quarter
  * planning under the panel row cap (whole oldest quarters dropped, a partial
  * newest quarter), metric thresholds with !(FIELD:0) on zero-means-unreported
  * ratios, local sorting, staging on a real DuckDB canvas, the canvas-off path, a
@@ -34,6 +37,8 @@ import {
   type FakeRequest,
   INDEX,
   installFakeService,
+  quarterEnds,
+  requestedQuarters,
 } from '../helpers/fake-fdic.js';
 import { contractRecovery, structured, textOf, toolError } from '../helpers/tool-results.js';
 
@@ -101,11 +106,14 @@ function generatedRow(cert: number, repdte: string): Record<string, unknown> {
 }
 
 /**
- * The preflight (buckets in REPDTE key order, as FDIC returns them) and the
- * per-quarter pages, served in CERT order by offset and limit.
+ * The latest-quarter lookup (2026-06-30, unless a test registered its own first),
+ * the preflight (buckets in REPDTE key order, as FDIC returns them), and the
+ * page requests — one quarter or a range of them — served in CERT order by
+ * offset and limit.
  */
 function withPanel(quarters: Record<string, Quarter>) {
   const size = (q: Quarter) => (typeof q === 'number' ? q : q.length);
+  withLatest();
   fake.on(
     'financials',
     isPreflight,
@@ -118,19 +126,23 @@ function withPanel(quarters: Record<string, Quarter>) {
     ),
   );
   fake.on('financials', isPage, (request: FakeRequest) => {
-    const repdte = quarterOf(request.params);
-    const quarter = quarters[repdte] ?? [];
+    const selected = requestedQuarters(request.params.filters, Object.keys(quarters));
     const offset = Number(request.params.offset);
     const limit = Number(request.params.limit);
-    const rows =
-      typeof quarter === 'number'
-        ? Array.from({ length: Math.max(0, Math.min(limit, quarter - offset)) }, (_, i) =>
-            generatedRow(offset + i + 1, repdte),
-          )
-        : [...quarter]
-            .sort((a, b) => Number(a.CERT) - Number(b.CERT))
-            .slice(offset, offset + limit);
-    return envelope('financials', rows, { total: size(quarter) });
+    // A generated quarter's CERTs run 1..count, so its first offset + limit rows are all a page can hold.
+    const rows = selected
+      .flatMap((repdte) => {
+        const quarter = quarters[repdte] ?? [];
+        return typeof quarter === 'number'
+          ? Array.from({ length: Math.min(quarter, offset + limit) }, (_, i) =>
+              generatedRow(i + 1, repdte),
+            )
+          : [...quarter];
+      })
+      .sort((a, b) => Number(a.CERT) - Number(b.CERT))
+      .slice(offset, offset + limit);
+    const total = selected.reduce((sum, repdte) => sum + size(quarters[repdte] ?? []), 0);
+    return envelope('financials', rows, { total });
   });
 }
 
@@ -224,15 +236,51 @@ describe('requests', () => {
     const clause =
       'CERT:(57701 OR 33990) AND STALP:"WA" AND ASSET:[100000 TO 5000000] AND NCLNLSR:[3 TO *] AND IDT1CER:[* TO 8] AND !(IDT1CER:0) AND ROAQ:[-1 TO 2]';
 
-    expect(fake.requests.some((r) => isLatest(r.params))).toBe(false);
+    expect(fake.requests.filter((r) => isLatest(r.params))).toHaveLength(1);
     expect(paramsOf(isPreflight).filters).toBe(`REPDTE:[20260331 TO 20260630] AND ${clause}`);
     expect(pageRequests().map((r) => r.params.filters)).toEqual([
-      `${clause} AND REPDTE:"20260630"`,
-      `${clause} AND REPDTE:"20260331"`,
+      `${clause} AND REPDTE:[20260331 TO 20260630]`,
     ]);
     expect(pageRequests()[0]?.params.fields).toBe(
       'CERT,NAME,STALP,REPDTE,ASSET,NCLNLSR,IDT1CER,ROAQ,EEFFQR',
     );
+  });
+
+  it('fetches a 40-quarter panel that fits one page in one request, each row dated by its own quarter on both surfaces', async () => {
+    const repdtes = quarterEnds(40);
+    withPanel(
+      Object.fromEntries(repdtes.map((repdte) => [repdte, [panelRow(628, repdte, HARBOR)]])),
+    );
+    const { result, text } = await run({
+      certs: [628],
+      metrics: ['total_assets'],
+      from_date: '2016Q3',
+      to_date: '2026Q2',
+      limit: 40,
+    });
+
+    expect(pageRequests().map((r) => r.params)).toEqual([
+      {
+        filters: 'CERT:628 AND REPDTE:[20160930 TO 20260630]',
+        fields: 'CERT,NAME,STALP,REPDTE,ASSET',
+        sort_by: 'CERT',
+        sort_order: 'ASC',
+        limit: '40',
+        offset: '0',
+      },
+    ]);
+    const output = structured<Output>(result);
+    expect(output).toMatchObject({
+      report_dates: { from: '2016-09-30', to: '2026-06-30' },
+      total_matching: 40,
+      rows_fetched: 40,
+      panel_truncated: false,
+    });
+    const dates = repdtes.map((d) => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`);
+    expect(output.rows.map((r) => [r.cert, r.report_date])).toEqual(dates.map((d) => [628, d]));
+    for (const date of [dates[0], dates[20], dates[39]]) {
+      expect(text).toContain(`| 628 | EVERGREEN HARBOR BK | WA | ${date} | 2,456,123 |`);
+    }
   });
 
   it.each<[string, string, string]>([
@@ -266,12 +314,41 @@ describe('requests', () => {
       '20250930 TO 20251231',
     ],
     ['to_date alone, as a one-quarter panel', { to_date: '2024Q4' }, '20241231 TO 20241231'],
-  ])('maps %s to REPDTE bounds without the latest-quarter lookup', async (_label, input, range) => {
-    withPanel({});
-    const { output } = await handle(input);
-    expect(paramsOf(isPreflight).filters).toBe(`REPDTE:[${range}]`);
-    expect(fake.requests.some((r) => isLatest(r.params))).toBe(false);
+  ])(
+    'maps %s to REPDTE bounds, checked against the latest published quarter',
+    async (_label, input, range) => {
+      withPanel({});
+      const { output } = await handle(input);
+      expect(paramsOf(isPreflight).filters).toBe(`REPDTE:[${range}]`);
+      expect(fake.requests.filter((r) => isLatest(r.params))).toHaveLength(1);
+      expect(output.report_dates_defaulted).toBe(false);
+    },
+  );
+
+  it('ends a window that runs past the latest published quarter at that quarter, saying so on both surfaces', async () => {
+    withPanel({ '20260331': [panelRow(57701, '20260331', HARBOR)] });
+    const { result, text } = await run({
+      metrics: ['total_assets'],
+      from_date: '2026Q1',
+      to_date: '2027Q4',
+    });
+    const output = structured<Output>(result);
+    expect(paramsOf(isPreflight).filters).toBe('REPDTE:[20260331 TO 20260630]');
+    expect(output.report_dates).toEqual({ from: '2026-03-31', to: '2026-06-30' });
     expect(output.report_dates_defaulted).toBe(false);
+    const clamp =
+      'to_date 2027-12-31 is after the latest published quarter, so the panel ends at 2026-06-30.';
+    expect(output.notice).toBe(clamp);
+    expect(text).toContain('## Call Report panel — 2026-03-31 to 2026-06-30');
+    expect(text).toContain(`> ${clamp}`);
+  });
+
+  it('names a window cut back to the latest quarter in the zero-hit notice too', async () => {
+    withPanel({});
+    const { enrichment } = await handle({ from_date: '2025Q1', to_date: '2026-12-31' });
+    expect(enrichment.notice).toContain(
+      'to_date 2026-12-31 is after the latest published quarter, so the panel ends at 2026-06-30.',
+    );
   });
 
   it('runs from_date alone to the latest published quarter, not flagged as defaulted', async () => {
@@ -634,11 +711,60 @@ describe('both surfaces through the production contract', () => {
       /fdic_list_reference/,
       /1000000 = \$1 billion/,
       /headquarters state/,
-      /fdic_search_institutions/,
+      /These CERTs may also have filed for none of the requested quarters; check them with fdic_search_institutions\./,
     ];
     for (const fragment of fragments) expect(output.notice).toMatch(fragment);
+    expect(output.notice).not.toContain('None of these CERTs filed');
     expect(text).toContain('0 matching institution-quarters');
     expect(text).toMatch(/^> .*latest published quarter/m);
+  });
+
+  it.each<[string, Input]>([
+    ['a metric threshold', { certs: [628], metric_filters: [{ metric: 'roa', min: 50 }] }],
+    ['a headquarters state', { certs: [628], state: 'WA' }],
+    ['an asset bound', { certs: [628], max_assets: 1000 }],
+  ])(
+    'offers missing filings as one possible cause, not the cause, when %s also narrowed the panel',
+    async (_label, input) => {
+      withPanel({});
+      const { result, text } = await run({ ...input, to_date: '2026Q2' });
+      const notice = structured<Output>(result).notice ?? '';
+      expect(notice).toContain(
+        'These CERTs may also have filed for none of the requested quarters; check them with fdic_search_institutions.',
+      );
+      expect(notice).not.toContain('None of these CERTs filed');
+      expect(text).toMatch(/^> .*These CERTs may also have filed/m);
+    },
+  );
+
+  it('says the CERTs filed for none of the quarters when nothing else narrowed the panel', async () => {
+    withPanel({});
+    const { result, text } = await run({ certs: [628], from_date: '2026Q1', to_date: '2026Q2' });
+    const notice =
+      'None of these CERTs filed for the requested quarters; check them with fdic_search_institutions.';
+    expect(structured<Output>(result).notice).toBe(notice);
+    expect(text).toContain(`> ${notice}`);
+  });
+
+  it('reads min_assets 0 as no bound: no ASSET clause, no asset fragment, no narrowing', async () => {
+    withPanel({});
+    const { output, enrichment } = await handle({ certs: [628], min_assets: 0, to_date: '2026Q2' });
+    expect(paramsOf(isPreflight).filters).toBe('REPDTE:[20260630 TO 20260630] AND CERT:628');
+    expect(output.total_matching).toBe(0);
+    expect(enrichment.notice).toBe(
+      'None of these CERTs filed for the requested quarters; check them with fdic_search_institutions.',
+    );
+  });
+
+  it('keeps max_assets beside a min_assets of 0 as an upper bound alone', async () => {
+    withPanel({});
+    const { enrichment } = await handle({ min_assets: 0, max_assets: 5000, to_date: '2026Q2' });
+    expect(paramsOf(isPreflight).filters).toBe(
+      'REPDTE:[20260630 TO 20260630] AND ASSET:[* TO 5000]',
+    );
+    expect(enrichment.notice).toBe(
+      'Asset bounds are in thousands of dollars (1000000 = $1 billion).',
+    );
   });
 
   it('falls back to a plain zero-hit notice when no fragment applies', async () => {
@@ -662,10 +788,10 @@ describe('both surfaces through the production contract', () => {
     });
     expect(output.rows).toHaveLength(2);
     const name = output.dataset?.name ?? '';
-    expect(output.notice).toContain(name);
-    expect(output.notice).toContain('fdic_dataframe_query');
+    const pointer = `use fdic_dataframe_describe with name ${name} to inspect its columns, then fdic_dataframe_query`;
+    expect(output.notice).toContain(pointer);
     expect(text).toContain(`**Staged:** ${name} — 3 rows`);
-    expect(text).toMatch(new RegExp(`^> .*${name}`, 'm'));
+    expect(text).toMatch(new RegExp(`^> .*${pointer}`, 'm'));
   });
 
   it('validates an under-cap partial page with the canvas off, pointing at no dataframe tool', async () => {
@@ -740,18 +866,70 @@ describe('errors', () => {
     expect(fake.requests.map((r) => r.params.fields)).toEqual(['REPDTE']);
   });
 
+  it.each<[string, Input, string]>([
+    [
+      'with to_date after it too',
+      { certs: [628], from_date: '2027Q1', to_date: '2027Q4' },
+      'from_date 2027-03-31 is after 2026-06-30, the latest published quarter.',
+    ],
+    [
+      'with no filter but the window',
+      { from_date: '2027Q1', to_date: '2027Q4' },
+      'from_date 2027-03-31 is after 2026-06-30, the latest published quarter.',
+    ],
+    [
+      'as a to_date alone',
+      { to_date: '2027Q4' },
+      'to_date 2027-12-31 is after 2026-06-30, the latest published quarter.',
+    ],
+    [
+      'as a from_date alone',
+      { from_date: '2027Q1' },
+      'from_date 2027-03-31 is after 2026-06-30, the latest published quarter.',
+    ],
+  ])(
+    'fails a window that starts after the latest published quarter %s as invalid_date_range',
+    async (_label, input, message) => {
+      withLatest();
+      const { result, text } = await run(input);
+      const error = toolError(result);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringContaining(message),
+        data: { reason: 'invalid_date_range' },
+      });
+      const field = 'from_date' in input ? 'from_date' : 'to_date';
+      // Omitting from_date alone would leave a to_date alone that fails the same way.
+      const hint =
+        'from_date' in input && 'to_date' in input
+          ? 'Set from_date on or before 2026-06-30 (the latest published quarter), or omit both dates.'
+          : `Set ${field} on or before 2026-06-30 (the latest published quarter), or omit it.`;
+      expect(error.data?.recovery?.hint).toBe(hint);
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).toContain(message);
+      expect(text).toContain('reason invalid_date_range');
+      expect(fake.requests.map((r) => r.params.fields)).toEqual(['REPDTE']);
+    },
+  );
+
   it('reports a saturated request queue as pacer_shed', async () => {
     const pacer = createPacer({ name: 'fdic-shed', limits: [{ requests: 1, perMs: 60_000 }] });
     installFakeService(fake, { pacer });
     withLatest();
     withPanel(PANEL);
     const { result } = await run({});
-    expect(toolError(result)).toMatchObject({
+    const error = toolError(result);
+    expect(error).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
       data: {
         reason: 'pacer_shed',
         retryable: true,
-        recovery: { hint: contractRecovery(tool, 'pacer_shed') },
+        recovery: {
+          hint: contractRecovery(tool, 'pacer_shed').replace(
+            'retryAfter seconds',
+            `${error.data?.retryAfter} seconds`,
+          ),
+        },
       },
     });
   });
@@ -770,7 +948,12 @@ describe('errors', () => {
       data: {
         reason: 'upstream_rate_limited',
         retryAfter: 30,
-        recovery: { hint: contractRecovery(tool, 'upstream_rate_limited') },
+        recovery: {
+          hint: contractRecovery(tool, 'upstream_rate_limited').replace(
+            'retryAfter seconds',
+            '30 seconds',
+          ),
+        },
       },
     });
   });

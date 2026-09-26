@@ -5,16 +5,21 @@
  * @module services/fdic/metric-catalog
  */
 
+export const METRIC_BASES = [
+  'point_in_time',
+  'quarter',
+  'quarter_annualized',
+  'year_to_date',
+  'ytd_annualized',
+] as const;
+
 /** How a metric accumulates over the reporting period. */
-export type MetricBasis =
-  | 'point_in_time'
-  | 'quarter'
-  | 'quarter_annualized'
-  | 'year_to_date'
-  | 'ytd_annualized';
+export type MetricBasis = (typeof METRIC_BASES)[number];
+
+export const METRIC_UNITS = ['usd_thousands', 'percent', 'count'] as const;
 
 /** Unit a metric's values carry. Dollar amounts are in thousands, as FDIC publishes them. */
-export type MetricUnit = 'usd_thousands' | 'percent' | 'count';
+export type MetricUnit = (typeof METRIC_UNITS)[number];
 
 export const METRIC_NAMES = [
   'total_assets',

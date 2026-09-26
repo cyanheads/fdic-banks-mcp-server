@@ -3,8 +3,10 @@
  * staging under minted df_ names with provenance kept in ctx.state, one shared
  * canvas per tenant, describe ordering and paging, SQL through the read-only
  * gate with framework rejections rethrown under fdic_dataframe_query's contract
- * reasons and recovery, register_as provenance, drop, the lazy TTL sweep,
- * canvas expiry, staging failure and cancellation, and tenant isolation.
+ * reasons and recovery, the linear string-literal scan behind the missing_table
+ * pre-check, register_as provenance, drop, the staging budget's oldest-first
+ * eviction and register_as_too_large, the lazy TTL sweep, canvas expiry,
+ * staging failure and cancellation, tenant isolation, and the listing option.
  * @module tests/services/canvas-bridge/canvas-bridge.test
  */
 
@@ -18,6 +20,7 @@ import {
   getCanvasBridge,
   initCanvasBridge,
   type StageOptions,
+  stripStringLiterals,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { createDuckdbCanvas, tenantSession } from '../../helpers/canvas.js';
 import { contractRecovery } from '../../helpers/tool-results.js';
@@ -492,6 +495,46 @@ describe('query', () => {
       new CanvasBridge(double).query(queryCtx(), 'SELECT 1', { rowLimit: 10 }),
     ).rejects.toBe(boom);
   });
+
+  it('scans an unterminated literal of escaped quotes in linear time, still finding the reference before it', async () => {
+    /** `'` + `\'`×30,000 + `\`: a backtracking scan retries every quote, costing over a second. */
+    const sql = `SELECT * FROM df_ZZZZZ_ZZZZZ WHERE note = '${"\\'".repeat(30_000)}\\`;
+    const started = performance.now();
+    const error = await rejection(bridge.query(queryCtx(), sql, { rowLimit: 10 }));
+    const elapsedMs = performance.now() - started;
+    expect(error.data).toMatchObject({ reason: 'missing_table', tableName: 'df_ZZZZZ_ZZZZZ' });
+    expect(elapsedMs).toBeLessThan(100);
+  });
+});
+
+describe('stripStringLiterals', () => {
+  /** The two-pass scan it replaced, the oracle for SQL whose literals each hold one quote kind. */
+  const twoPass = (sql: string) =>
+    sql.replace(/'([^'\\]|\\.|'')*'/g, "''").replace(/"([^"\\]|\\.|"")*"/g, '""');
+
+  it.each([
+    'SELECT * FROM df_AB12C_3DE45',
+    "SELECT name FROM df_AB12C_3DE45 WHERE state = 'WA' AND city = 'Walla Walla'",
+    "SELECT 'df_ZZZZZ_ZZZZZ' AS label, COUNT(*) AS n FROM df_AB12C_3DE45",
+    "SELECT * FROM df_AB12C_3DE45 WHERE name = 'O''Brien Savings' OR name = ''",
+    "SELECT * FROM df_AB12C_3DE45 WHERE note = 'back\\'slash' AND x = 'y'",
+    'SELECT "roa" AS "Return ""on"" assets" FROM df_AB12C_3DE45 a JOIN df_ZZZZZ_ZZZZZ b USING (cert)',
+    'WITH t AS (SELECT cert FROM df_AB12C_3DE45)\nSELECT * FROM t\n-- \'a comment\'\nWHERE "cert" > 0',
+  ])('blanks the literals of %j exactly as the two-pass scan did', (sql) => {
+    expect(stripStringLiterals(sql)).toBe(twoPass(sql));
+  });
+
+  it('reads literals left to right, so a quote of the other kind inside one opens nothing', () => {
+    expect(
+      stripStringLiterals(`SELECT "it's" AS label FROM df_ZZZZZ_ZZZZZ WHERE state = 'WA'`),
+    ).toBe(`SELECT "" AS label FROM df_ZZZZZ_ZZZZZ WHERE state = ''`);
+  });
+
+  it('blanks an unterminated literal through the end of the statement', () => {
+    expect(stripStringLiterals("SELECT * FROM df_ZZZZZ_ZZZZZ WHERE x = 'open \\")).toBe(
+      "SELECT * FROM df_ZZZZZ_ZZZZZ WHERE x = ''",
+    );
+  });
 });
 
 describe('drop', () => {
@@ -509,6 +552,110 @@ describe('drop', () => {
 
     expect(await bridge.drop(session(), name)).toBe(false);
     expect(await bridge.drop(session(), 'df_NEVER_STAGE')).toBe(false);
+  });
+});
+
+describe('staging budget', () => {
+  /** Stages `count` one-column rows through `through`, one second after the last call. */
+  async function stageRows(through: CanvasBridge, count: number): Promise<string> {
+    vi.setSystemTime(Date.now() + 1000);
+    const dataset = await through.stage(
+      session(),
+      stageOptions({
+        rows: Array.from({ length: count }, (_, n) => ({ n })),
+        schema: [{ name: 'n', type: 'INTEGER' }],
+      }),
+    );
+    if (!dataset) throw new Error('staging failed');
+    return dataset.name;
+  }
+
+  const liveNames = async (through: CanvasBridge) =>
+    (await through.describe(session())).map((m) => m.tableName);
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0);
+  });
+
+  it('evicts the oldest dataframes, table and provenance, only until the live rows fit', async () => {
+    const small = new CanvasBridge(canvas, { maxStagedRows: 5 });
+    const a = await stageRows(small, 2);
+    const b = await stageRows(small, 2);
+    const c = await stageRows(small, 1);
+    expect(await liveNames(small)).toEqual([c, b, a]);
+
+    const d = await stageRows(small, 3);
+    expect(await liveNames(small)).toEqual([d, c]);
+    expect(await small.describe(session(), a)).toEqual([]);
+    expect((await canvasTables()).sort()).toEqual([c, d].sort());
+
+    const error = await rejection(small.query(queryCtx(), `SELECT * FROM ${a}`, { rowLimit: 10 }));
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({ reason: 'missing_table', tableName: a });
+    expect(error.message).toContain('dropped to make room for newer dataframes');
+  });
+
+  it('keeps the newest dataframe even when it alone passes the budget', async () => {
+    const small = new CanvasBridge(canvas, { maxStagedRows: 5 });
+    await stageRows(small, 2);
+    const big = await stageRows(small, 6);
+    expect(await liveNames(small)).toEqual([big]);
+    expect(await canvasTables()).toEqual([big]);
+  });
+
+  it('counts a register_as dataframe by the rows it materialized, never evicting the tables its SQL reads first', async () => {
+    const small = new CanvasBridge(canvas, { maxStagedRows: 5 });
+    const a = await stageRows(small, 3);
+    vi.setSystemTime(Date.now() + 1000);
+    const first = await small.query(queryCtx(), `SELECT n FROM ${a} WHERE n < 2`, {
+      rowLimit: 10,
+      registerAs: 'df_DERIV_00001',
+    });
+    expect(first.meta?.rowCount).toBe(2);
+    expect(await liveNames(small)).toEqual(['df_DERIV_00001', a]);
+
+    // row_limit bounds the rows returned, not the rows register_as keeps.
+    vi.setSystemTime(Date.now() + 1000);
+    const second = await small.query(queryCtx(), `SELECT n FROM ${a}`, {
+      rowLimit: 1,
+      registerAs: 'df_DERIV_00002',
+    });
+    expect(second.meta?.rowCount).toBe(3);
+    expect(await liveNames(small)).toEqual(['df_DERIV_00002', 'df_DERIV_00001']);
+    expect((await canvasTables()).sort()).toEqual(['df_DERIV_00001', 'df_DERIV_00002']);
+  });
+
+  it('refuses a register_as result larger than the whole budget, keeping none of it and evicting nothing', async () => {
+    const small = new CanvasBridge(canvas, { maxStagedRows: 5 });
+    const a = await stageRows(small, 3);
+    const error = await rejection(
+      small.query(queryCtx(), `SELECT n FROM ${a} UNION ALL SELECT n FROM ${a}`, {
+        rowLimit: 10,
+        registerAs: 'df_DERIV_00001',
+      }),
+    );
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toEqual({
+      reason: 'register_as_too_large',
+      tableName: 'df_DERIV_00001',
+      rowCount: 6,
+      maxStagedRows: 5,
+      recovery: { hint: contractRecovery(dataframeQueryTool, 'register_as_too_large') },
+    });
+    expect(error.message).toContain('6 rows');
+    expect(error.message).toContain('5-row');
+    expect(await liveNames(small)).toEqual([a]);
+    expect(await canvasTables()).toEqual([a]);
+  });
+
+  it('holds 1,000,000 rows by default, evicting the oldest once a stage passes it', async () => {
+    const first = await stageRows(bridge, 1);
+    const bulk = await stageRows(bridge, 999_999);
+    expect(await liveNames(bridge)).toEqual([bulk, first]);
+
+    const last = await stageRows(bridge, 1);
+    expect(await liveNames(bridge)).toEqual([last, bulk]);
   });
 });
 
@@ -540,5 +687,12 @@ describe('initCanvasBridge', () => {
     expect(getCanvasBridge()).toBeInstanceOf(CanvasBridge);
     initCanvasBridge(undefined);
     expect(getCanvasBridge()).toBeUndefined();
+  });
+
+  it('lists by default and passes the listing option through', () => {
+    initCanvasBridge(canvas);
+    expect(getCanvasBridge()?.listing).toBe(true);
+    initCanvasBridge(canvas, { listing: false });
+    expect(getCanvasBridge()?.listing).toBe(false);
   });
 });
