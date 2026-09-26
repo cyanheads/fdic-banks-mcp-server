@@ -26,6 +26,41 @@
       ],
       "environmentVariables": [
         {
+          "name": "FDIC_RATE_LIMIT_RPS",
+          "description": "Maximum request starts per second to api.fdic.gov (1–15), shared by every caller of this process.",
+          "format": "number",
+          "isRequired": false,
+          "default": "8"
+        },
+        {
+          "name": "FDIC_CACHE_TTL_SECONDS",
+          "description": "TTL of the in-process FDIC response cache in seconds; 0 disables caching.",
+          "format": "number",
+          "isRequired": false,
+          "default": "3600"
+        },
+        {
+          "name": "FDIC_PANEL_MAX_ROWS",
+          "description": "Row cap for one fdic_query_financials panel (1,000–200,000). Newest quarters are kept when it binds.",
+          "format": "number",
+          "isRequired": false,
+          "default": "50000"
+        },
+        {
+          "name": "FDIC_DATASET_TTL_SECONDS",
+          "description": "Per-table TTL for staged dataframes, in seconds (minimum 60).",
+          "format": "number",
+          "isRequired": false,
+          "default": "86400"
+        },
+        {
+          "name": "FDIC_DATAFRAME_DROP_ENABLED",
+          "description": "Set to true to expose fdic_dataframe_drop; otherwise it is registered disabled.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -54,6 +89,41 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "FDIC_RATE_LIMIT_RPS",
+          "description": "Maximum request starts per second to api.fdic.gov (1–15), shared by every caller of this process.",
+          "format": "number",
+          "isRequired": false,
+          "default": "8"
+        },
+        {
+          "name": "FDIC_CACHE_TTL_SECONDS",
+          "description": "TTL of the in-process FDIC response cache in seconds; 0 disables caching.",
+          "format": "number",
+          "isRequired": false,
+          "default": "3600"
+        },
+        {
+          "name": "FDIC_PANEL_MAX_ROWS",
+          "description": "Row cap for one fdic_query_financials panel (1,000–200,000). Newest quarters are kept when it binds.",
+          "format": "number",
+          "isRequired": false,
+          "default": "50000"
+        },
+        {
+          "name": "FDIC_DATASET_TTL_SECONDS",
+          "description": "Per-table TTL for staged dataframes, in seconds (minimum 60).",
+          "format": "number",
+          "isRequired": false,
+          "default": "86400"
+        },
+        {
+          "name": "FDIC_DATAFRAME_DROP_ENABLED",
+          "description": "Set to true to expose fdic_dataframe_drop; otherwise it is registered disabled.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",

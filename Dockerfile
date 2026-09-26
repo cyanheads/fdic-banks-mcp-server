@@ -73,6 +73,16 @@ COPY --from=build /usr/src/app/node_modules/@socketsecurity/bun-security-scanner
 # actually imports belongs in its own `dependencies`, so nothing needed at
 # runtime is lost. The OTEL step below carries the same flag — without it, that
 # install re-resolves the graph and pulls every optional peer back in.
+#
+# This install runs here, on the target platform, rather than copying
+# node_modules from the build stage, because of DuckDB's native binding:
+# @duckdb/node-api (a direct dependency) loads @duckdb/node-bindings, whose
+# per-platform packages (node-bindings-linux-x64, -linux-arm64, and their musl
+# variants) are optional dependencies, and Bun installs only those matching the
+# CPU it runs on. The build stage is pinned to $BUILDPLATFORM, so a node_modules
+# tree copied from it would carry the build host's binding alone and the other
+# architecture of a linux/amd64,linux/arm64 build would lose DuckDB. Never copy
+# node_modules forward from the build stage.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --production --omit=peer --frozen-lockfile --ignore-scripts
 

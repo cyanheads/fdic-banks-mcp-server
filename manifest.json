@@ -16,7 +16,12 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "FDIC_RATE_LIMIT_RPS": "${user_config.FDIC_RATE_LIMIT_RPS}",
+        "FDIC_CACHE_TTL_SECONDS": "${user_config.FDIC_CACHE_TTL_SECONDS}",
+        "FDIC_PANEL_MAX_ROWS": "${user_config.FDIC_PANEL_MAX_ROWS}",
+        "FDIC_DATASET_TTL_SECONDS": "${user_config.FDIC_DATASET_TTL_SECONDS}",
+        "FDIC_DATAFRAME_DROP_ENABLED": "${user_config.FDIC_DATAFRAME_DROP_ENABLED}"
       }
     }
   },
@@ -25,5 +30,47 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "FDIC_RATE_LIMIT_RPS": {
+      "title": "FDIC request rate (per second)",
+      "description": "Maximum request starts per second to api.fdic.gov (1–15).",
+      "type": "number",
+      "required": false,
+      "default": 8,
+      "min": 1,
+      "max": 15
+    },
+    "FDIC_CACHE_TTL_SECONDS": {
+      "title": "Response cache TTL (seconds)",
+      "description": "TTL of the in-process FDIC response cache; 0 disables caching.",
+      "type": "number",
+      "required": false,
+      "default": 3600,
+      "min": 0
+    },
+    "FDIC_PANEL_MAX_ROWS": {
+      "title": "Financial panel row cap",
+      "description": "Row cap for one fdic_query_financials panel (1,000–200,000). Newest quarters are kept when it binds.",
+      "type": "number",
+      "required": false,
+      "default": 50000,
+      "min": 1000,
+      "max": 200000
+    },
+    "FDIC_DATASET_TTL_SECONDS": {
+      "title": "Staged dataframe TTL (seconds)",
+      "description": "Per-table TTL for staged dataframes (minimum 60).",
+      "type": "number",
+      "required": false,
+      "default": 86400,
+      "min": 60
+    },
+    "FDIC_DATAFRAME_DROP_ENABLED": {
+      "title": "Enable fdic_dataframe_drop",
+      "description": "Expose the tool that drops a staged dataframe before its TTL.",
+      "type": "boolean",
+      "required": false,
+      "default": false
+    }
+  }
 }
