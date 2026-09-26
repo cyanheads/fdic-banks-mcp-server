@@ -8,7 +8,7 @@ Open one from the **Issues** tab and pick the **Bug Report** or **Feature Reques
 
 `fdic-banks-mcp-server` is built on [@cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core), which handles transports, auth, config, logging, and telemetry. Sorting out which layer broke saves everyone a round-trip:
 
-- **This repo** — a tool returns wrong data, an upstream API call fails, a schema doesn't match reality, a description misleads the model.
+- **This repo** — a tool returns wrong data, an FDIC BankFind API call fails, a schema doesn't match reality, a description misleads the model.
 - **[mcp-ts-core](https://github.com/cyanheads/mcp-ts-core/issues)** — a builder rejects valid input, `createApp()` fails on a valid config, a `Context` method behaves contrary to its docs, transport or auth misbehaves regardless of which tool you call.
 
 If you're not sure, file here and it'll get routed.
@@ -23,8 +23,8 @@ A few things that save a round-trip:
 
 ## What makes an issue actionable
 
-- Server version, `mcp-ts-core` version, runtime (Bun / Node / Workers), and transport (stdio / HTTP).
-- The tool, resource, or prompt involved, and the arguments you called it with.
+- Server version, `mcp-ts-core` version, runtime (Bun / Node), and transport (stdio / HTTP).
+- The tool involved, and the arguments you called it with.
 - Actual vs expected behavior, verbatim: error messages and stack traces as they appeared.
 - For features: the use case first, then the API as you'd want to call it.
 

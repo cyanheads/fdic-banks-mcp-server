@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `framework-skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `framework-skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `framework-skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -59,120 +46,146 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool
 
+Abridged from `src/mcp-server/tools/definitions/search-institutions.tool.ts`:
+
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { callBudget, getFdicService } from '@/services/fdic/fdic-service.js';
+import { normalizeState } from '@/services/fdic/us-states.js';
+import { blankAsUnset, stateInput } from '../input-schemas.js';
+import { inline, num } from '../markdown.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+// InstitutionSchema: the per-record output object, defined above the tool in the same file.
+
+export const searchInstitutionsTool = tool('fdic_search_institutions', {
+  title: 'Search FDIC-insured institutions',
+  description: 'Find FDIC-insured banks and savings institutions by name, CERT, location, … Credit unions are insured by the NCUA and are not in this data.',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().int().min(1).max(100).default(10).describe('Max results (1–100)'),
+    name: blankAsUnset(z.string().max(100).optional()).describe('Institution name to match, up to 100 characters — …'),
+    state: stateInput('Headquarters state: two-letter code in any case (wa) or full name (Washington); …'),
+    // … certs, city, status, bank_classes, min_assets, max_assets, holding_company_rssd, sort
+    limit: blankAsUnset(z.number().int().min(1).max(100).default(20)).describe('Institutions per page (1–100).'),
+    offset: blankAsUnset(z.number().int().min(0).max(100_000).default(0)).describe('Matches to skip (0–100,000); pass next_offset from the previous page.'),
   }),
+
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    institutions: z.array(InstitutionSchema).describe('Matching institutions for this page.'),
+    total: z.number().int().describe('Institutions matching the filters across all pages.'),
+    // … status_filter, next_offset, missing_certs
+    data_as_of: z.string().describe('When FDIC last rebuilt the institutions index (ISO timestamp).'),
   }),
-  auth: ['inventory:read'],
+
+  enrichment: {
+    notice: z.string().optional().describe('Guidance when nothing matched, the page is past the end, or more pages remain.'),
+    // … truncated, shown, cap
+  },
+
+  errors: [
+    {
+      reason: 'invalid_state',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'state is not a US state, DC, or territory code or name',
+      recovery: 'Pass a two-letter postal code such as WA or a full state name such as Washington.',
+      severity: 'notice',
+    },
+    // … plus pacer_shed and upstream_rate_limited (RateLimited, retryable, thrownBy: 'service')
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const state = input.state === undefined ? undefined : normalizeState(input.state);
+    if (input.state !== undefined && state === undefined) {
+      throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`, {
+        ...ctx.recoveryFor('invalid_state'),
+      });
+    }
+    // … name normalization, asset-range check, query assembly
+    const page = await getFdicService().searchInstitutions(query, ctx, callBudget());
+    if (page.total === 0) ctx.enrich.notice('No institutions matched these filters.');
+    return { institutions: page.rows, total: page.total, /* … */ data_as_of: page.dataAsOf };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
   // Different clients read different surfaces (Claude Code → structuredContent,
   // Claude Desktop → content[]); both must carry the same data.
   // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
-});
-```
-
-### Resource
-
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
-
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
+  format: (result) => {
+    const lines = [`## ${num(result.total)} institutions match (status filter: ${result.status_filter})`];
+    // … data_as_of, next page, then one block per institution with upstream names through inline()
+    return [{ type: 'text', text: lines.join('\n') }];
   },
 });
 ```
 
-### Prompt
+Conventions every `fdic_` tool follows:
 
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
+- Optional inputs are wrapped in `blankAsUnset()` (`src/mcp-server/tools/input-schemas.ts`): form clients submit every field, and a blank string means unset.
+- A handler that calls FDIC takes one `callBudget()` (`callBudget(PANEL_BUDGET_MS)` for the panel) and passes it to every service call, and declares `pacer_shed` and `upstream_rate_limited` with `thrownBy: 'service'`.
+- Dollar amounts stay in thousands, as FDIC publishes them; every data response carries `data_as_of`, and `format()` states the unit.
+- Upstream free text reaches `format()` through `inline()` / `cell()` from `src/mcp-server/tools/markdown.ts`.
+- A result larger than its inline preview is staged through `getCanvasBridge()?.stage(…)`, and the notice uses `stagedNotice()`.
 
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
+### Resources and prompts
+
+None. Every data path is a tool, so tool-only clients reach all of it (`docs/design.md` § Design Decisions 18–19). Use the `add-resource` / `add-prompt` skills if that changes.
 
 ### Server config
 
 ```ts
 // src/config/server-config.ts — lazy-parsed, separate from framework config
-import { z } from '@cyanheads/mcp-ts-core';
-import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
-
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  rateLimitRps: z.coerce.number().int().min(1).max(15).default(8)
+    .describe('Maximum request starts per second to api.fdic.gov, shared by every caller of this process.'),
+  cacheTtlSeconds: z.coerce.number().int().min(0).default(3600)
+    .describe('TTL of the in-process response cache in seconds; 0 disables caching.'),
+  panelMaxRows: z.coerce.number().int().min(1000).max(200_000).default(50_000)
+    .describe('Row cap for one fdic_query_financials panel. Newest quarters are kept when it binds.'),
+  datasetTtlSeconds: z.coerce.number().int().min(60).default(86_400)
+    .describe('Per-table TTL for staged dataframes, in seconds.'),
+  dataframeDropEnabled: z.stringbool().default(false)
+    .describe('Set to "true" to register fdic_dataframe_drop live; otherwise it is registered disabled with the enable hint.'),
 });
 
-let _config: z.infer<typeof ServerConfigSchema> | undefined;
-export function getServerConfig() {
+let _config: ServerConfig | undefined;
+export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
+    rateLimitRps: 'FDIC_RATE_LIMIT_RPS',
+    cacheTtlSeconds: 'FDIC_CACHE_TTL_SECONDS',
+    panelMaxRows: 'FDIC_PANEL_MAX_ROWS',
+    datasetTtlSeconds: 'FDIC_DATASET_TTL_SECONDS',
+    dataframeDropEnabled: 'FDIC_DATAFRAME_DROP_ENABLED',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`FDIC_RATE_LIMIT_RPS`) not the path (`rateLimitRps`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
+`src/index.ts` loads `.env` itself before `createApp()`, because two values are read before the framework's own load: the drop gate (`buildToolDefinitions({ dropEnabled })`) and the `CANVAS_PROVIDER_TYPE ??= 'duckdb'` default that turns dataframe staging on. `CANVAS_PROVIDER_TYPE=none` turns it off.
+
 ### Server identity and instructions
 
-`createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
+`createApp()` identity is forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
 
 ```ts
 await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
+  name: 'fdic-banks-mcp-server',
+  title: 'fdic-banks-mcp-server', // must match the unscoped package name — enforced by lint:packaging
+  tools: buildToolDefinitions({ dropEnabled: getServerConfig().dataframeDropEnabled }),
+  resources: [],
+  prompts: [],
+  instructions: 'FDIC BankFind data on FDIC-insured banks and savings institutions … every data response carries data_as_of …',
+  // …
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
+`description` is never set here: `package.json` `description` is the canonical source, and the framework serves it.
+
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. This server's string carries the CERT workflow, the tool hand-offs, units and `data_as_of`, the dataframe hand-off, and the rate-limit and untrusted-name hazards; update it when a tool's role changes.
 
 ### Session posture and shutdown
 
@@ -180,15 +193,25 @@ Two more `createApp()` options shape how the server runs rather than how it pres
 
 ```ts
 await createApp({
-  sessionMode: 'stateless',          // or { default: 'stateful', require: 'stateful' }
-  setup(core) { startMyWatcher(core.config); },
-  async teardown() { await stopMyWatcher(); },
+  // …
+  sessionMode: 'stateless',
+  setup(core) {
+    initFdicService();
+    initCanvasBridge(core.canvas, {
+      listing: !(core.config.mcpTransportType === 'http' && core.config.mcpAuthMode === 'none'),
+    });
+  },
+  teardown() {
+    disposeFdicService();
+  },
 });
 ```
 
-`sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Add `require: 'stateful'` when a tool asks the caller for input mid-handler via `ctx.requestInput`: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
+`sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). This server declares `'stateless'` — no tool calls `ctx.requestInput` — and `.env.example`, the `Dockerfile`, and the README Configuration table say the same; keep all four in agreement. Add `require: 'stateful'` if a tool ever asks the caller for input mid-handler: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
 
-`teardown(core)` is the `setup()` counterpart — release a watcher, socket, or non-`unref()`'d timer there. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
+`setup()` turns the dataframe listing off over HTTP with `MCP_AUTH_MODE=none`, where every caller shares one canvas and a listing would name everyone's tables (`docs/design.md` Design Decision 56).
+
+`teardown(core)` is the `setup()` counterpart. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling). Here it disposes the FDIC request pacer, which holds a dispatch timer and any queued requests; the framework shuts the canvas down on its own.
 
 ---
 
@@ -199,14 +222,14 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
+| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). Here it holds the tenant's canvas ID and each staged dataframe's provenance (`src/services/canvas-bridge/`). |
 | `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
+| `ctx.recoveryFor(reason)` | Typed lookup of the contract `recovery` for a declared reason. Returns `{ recovery: { hint } }` for known reasons, `{}` otherwise. Spread it into the `ctx.fail` data to mirror the contract hint into `content[]`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
 | `ctx.requestId` | Unique request ID. |
 | `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
+
+No tool asks the caller for input mid-call, so `ctx.requestInput` / `ctx.inputs` are unused; the framework CLAUDE.md documents them if that changes.
 
 ---
 
@@ -258,20 +281,28 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point — loads .env, defaults CANVAS_PROVIDER_TYPE, registers tools
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # FDIC_* env vars (Zod schema)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
+    fdic/
+      fdic-service.ts                   # BankFind client: cache → dedupe → retry → pacer → transport (init/accessor)
+      query-builder.ts                  # Filter clauses, report-date and name normalization
+      normalize.ts                      # Raw BankFind rows → domain records
+      metric-catalog.ts                 # 49 curated Call Report metrics (field, unit, basis) + default set
+      peer-stats.ts                     # Peer median, quartiles, percentile, rank
+      asset-bands.ts, bank-classes.ts, coverage.ts,
+      failure-methods.ts, insurance-funds.ts, us-states.ts   # Static reference tables
       types.ts                          # Domain types
+    canvas-bridge/
+      canvas-bridge.ts                  # DataCanvas adapter: df_<id> tables, per-table TTL, provenance
   mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+    tools/
+      definitions/
+        [tool-name].tool.ts             # 10 tool definitions
+        index.ts                        # buildToolDefinitions() — the drop gate
+      input-schemas.ts                  # blankAsUnset(), date, metric, and state inputs
+      markdown.ts                       # format() helpers: inline, cell, num, metricValue
 ```
 
 ---
@@ -280,10 +311,10 @@ src/
 
 | What | Convention | Example |
 |:-----|:-----------|:--------|
-| Files | kebab-case with suffix | `search-docs.tool.ts` |
-| Tool/resource/prompt names | snake_case | `search_docs` |
-| Directories | kebab-case | `src/services/doc-search/` |
-| Descriptions | Single string or template literal, no `+` concatenation | `'Search items by query and filter.'` |
+| Files | kebab-case with suffix | `search-institutions.tool.ts` |
+| Tool names | snake_case, `fdic_` prefix | `fdic_search_institutions` |
+| Directories | kebab-case | `src/services/canvas-bridge/` |
+| Descriptions | Single string or template literal, no `+` concatenation | `'List the vocabulary the other fdic_ tools accept and return: …'` |
 
 ---
 
@@ -356,11 +387,14 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:coverage` | Run tests with coverage (Istanbul provider) |
+| `bun run start` | Production mode, transport from `MCP_TRANSPORT_TYPE` |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
+| `bun run release:github` | Create the GitHub Release from the version's annotated tag and attach `dist/*.mcpb` (`-- --dry-run` prints the command) |
 
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
@@ -368,11 +402,11 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces `dist/fdic-banks-mcp-server.mcpb`, an extension bundle for one-click install in Claude Desktop; `bun run release:github` attaches it to the GitHub Release. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
-**README install badges** (Claude Desktop `.mcpb`, Cursor, VS Code) and the `base64` / `encodeURIComponent` config-generation commands are ship-time concerns — run the `polish-docs-meta` skill, which carries the badge format, layout, and generation snippets in `framework-skills/polish-docs-meta/references/readme.md`.
+**README install badges.** The README header carries the Claude Desktop badge, which downloads the `.mcpb` from the latest GitHub Release, and Cursor and VS Code badges whose payloads encode `npx -y @cyanheads/fdic-banks-mcp-server`. Regenerate those two payloads when the package name changes or a required env var is added; the `base64` / `encodeURIComponent` snippets are in `framework-skills/polish-docs-meta/references/readme.md`.
 
 ---
 
@@ -430,10 +464,12 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] `ctx.log` for logging, `ctx.state` for storage
 - [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
-- [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
-- [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
-- [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
-- [ ] Registered in `createApp()` arrays (directly or via barrel exports)
+- [ ] FDIC wrapping: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
+- [ ] FDIC wrapping: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
+- [ ] FDIC wrapping: tests include at least one sparse payload case with omitted upstream fields
+- [ ] FDIC wrapping: a handler that calls FDIC takes one `callBudget()` and passes it to every service call, and declares `pacer_shed` and `upstream_rate_limited` with `thrownBy: 'service'`
+- [ ] A new or removed tool also updates `buildToolDefinitions()` (`src/mcp-server/tools/definitions/index.ts`), the README tool tables and count, and the `instructions` string in `src/index.ts`
+- [ ] A new env var also updates `server.json` (both `packages[]` entries), `manifest.json` (`mcp_config.env` + `user_config`), `.env.example`, and the README Configuration table
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset

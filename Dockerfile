@@ -51,7 +51,7 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="fdic-banks-mcp-server"
-LABEL org.opencontainers.image.description="US bank health and failures — FDIC BankFind Suite: FDIC-insured institution financials (Call Report metrics), bank failures since 1934, Summary of Deposits, and branch/structure data."
+LABEL org.opencontainers.image.description="Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share via MCP. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/fdic-banks-mcp-server"

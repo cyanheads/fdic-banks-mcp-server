@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "fdic-banks-mcp-server",
   "version": "0.1.0",
-  "description": "US bank health and failures — FDIC BankFind Suite: FDIC-insured institution financials (Call Report metrics), bank failures since 1934, Summary of Deposits, and branch/structure data.",
+  "description": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",

@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "fdic-banks-mcp-server",
   "version": "0.1.0",
-  "description": "US bank health and failures — FDIC BankFind Suite: FDIC-insured institution financials (Call Report metrics), bank failures since 1934, Summary of Deposits, and branch/structure data.",
+  "description": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share.",
   "author": { "name": "cyanheads" },
   "homepage": "https://github.com/cyanheads/fdic-banks-mcp-server#readme",
   "repository": { "type": "git", "url": "https://github.com/cyanheads/fdic-banks-mcp-server" },

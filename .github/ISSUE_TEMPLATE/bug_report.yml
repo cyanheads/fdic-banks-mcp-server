@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Server bug or framework bug?** File here if a tool returns wrong data, an upstream API call fails, a schema doesn't match reality, or a description misleads the model. If a builder rejects valid input, `createApp()` fails on a valid config, or transport or auth misbehaves regardless of which tool you call, file against [mcp-ts-core](https://github.com/cyanheads/mcp-ts-core/issues) instead. Not sure? File here and it'll get routed.
+        **Server bug or framework bug?** File here if a tool returns wrong data, an FDIC BankFind API call fails, a schema doesn't match reality, or a description misleads the model. If a builder rejects valid input, `createApp()` fails on a valid config, or transport or auth misbehaves regardless of which tool you call, file against [mcp-ts-core](https://github.com/cyanheads/mcp-ts-core/issues) instead. Not sure? File here and it'll get routed.
 
         **Do not include secrets, credentials, API keys, tokens, PII, or other sensitive data.** Redact env vars, auth headers, user-identifying information, and internal URLs from all code snippets, logs, and stack traces before submitting. GitHub issues are public and permanent.
 
@@ -41,7 +41,6 @@ body:
       options:
         - Bun
         - Node.js
-        - Cloudflare Workers
     validations:
       required: true
 
@@ -60,7 +59,6 @@ body:
       options:
         - stdio
         - HTTP (Streamable HTTP)
-        - Worker (Cloudflare)
     validations:
       required: true
 
