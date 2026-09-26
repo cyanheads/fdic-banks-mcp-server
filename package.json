@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/fdic-banks-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpName": "io.github.cyanheads/fdic-banks-mcp-server",
   "description": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share via MCP. STDIO or Streamable HTTP.",
   "type": "module",
