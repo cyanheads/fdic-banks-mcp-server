@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "fdic-banks-mcp-server",
+  "version": "0.1.0",
+  "description": "US bank health and failures — FDIC BankFind Suite: FDIC-insured institution financials (Call Report metrics), bank failures since 1934, Summary of Deposits, and branch/structure data.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/fdic-banks-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/fdic-banks-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "fdic",
+    "bankfind",
+    "banking",
+    "bank-failures",
+    "call-report",
+    "bank-financials",
+    "summary-of-deposits",
+    "finance"
+  ],
+  "mcpServers": {
+    "fdic-banks-mcp-server": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@cyanheads/fdic-banks-mcp-server"
+      ],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}
