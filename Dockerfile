@@ -63,8 +63,8 @@ COPY package.json bun.lock bunfig.toml ./
 
 # The scanner bunfig.toml names is a devDependency, and Bun installs a missing
 # scanner through the same production-filtered install, which omits it and
-# aborts. Seed it from the build stage's full install instead. Remove this line
-# together with the scanner if bunfig.toml stops naming one.
+# aborts. Seed it from the build stage's full install instead. Remove this line,
+# and the `rm` at the end of this stage, if bunfig.toml stops naming a scanner.
 COPY --from=build /usr/src/app/node_modules/@socketsecurity/bun-security-scanner ./node_modules/@socketsecurity/bun-security-scanner
 
 # Install only production dependencies, ignoring any lifecycle scripts (like 'prepare')
@@ -117,6 +117,9 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
         @opentelemetry/semantic-conventions) \
       && bun add --omit=dev --omit=peer --ignore-scripts --os=linux --cpu="$cpu" $specs; \
     fi
+
+# The seeded scanner served only the installs above; keep it out of the image.
+RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 
 
 # ==============================================================================
