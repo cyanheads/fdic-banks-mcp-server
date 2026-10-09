@@ -36,6 +36,11 @@ describe('markdown helpers', () => {
     expect(cell('A|B\nC')).toBe('A\\|B C');
   });
 
+  it('escapes backslashes in table cells, so an escaped pipe in the text stays inside one cell', () => {
+    expect(cell('A\\|B')).toBe('A\\\\\\|B');
+    expect(cell('C:\\path')).toBe('C:\\\\path');
+  });
+
   it('renders numbers with separators and an em dash for absence', () => {
     expect(num(4091315000)).toBe('4,091,315,000');
     expect(num(1.23456)).toBe('1.23');

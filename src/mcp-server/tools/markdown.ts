@@ -23,9 +23,12 @@ export function splitLines(text: string): string[] {
   return text.split(LINE_BREAK);
 }
 
-/** Upstream text in a table cell: flattened, with pipes escaped. */
+/**
+ * Upstream text in a table cell: flattened, with backslashes and pipes escaped, so a
+ * `\|` in the text cannot leave a live pipe that splits the cell.
+ */
 export function cell(text: string): string {
-  return inline(text).replace(/\|/g, '\\|');
+  return inline(text).replace(/[\\|]/g, '\\$&');
 }
 
 /** A number with thousands separators and at most `maxFraction` decimals; `—` when absent. */
