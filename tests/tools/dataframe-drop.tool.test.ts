@@ -2,16 +2,21 @@
  * @fileoverview Tests for fdic_dataframe_drop over a real in-memory DuckDB
  * canvas: canvas_unavailable, dropping a name that is not staged through the
  * production contract, dropping a staged dataframe on one tenant's state (and
- * again, idempotently), and malformed names.
+ * again, idempotently), the canvas's canvas_not_found re-raised under this
+ * tool's recovery, and malformed names.
  * @module tests/tools/dataframe-drop.tool.test
  */
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dataframeDropTool } from '@/mcp-server/tools/definitions/dataframe-drop.tool.js';
-import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  type CanvasBridge,
+  getCanvasBridge,
+  initCanvasBridge,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { createDuckdbCanvas, tenantSession } from '../helpers/canvas.js';
 import { contractRecovery, structured, textOf, toolError } from '../helpers/tool-results.js';
 
@@ -25,6 +30,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   initCanvasBridge(undefined);
   await duck.shutdown(createMockContext());
 });
@@ -71,6 +77,28 @@ describe('fdic_dataframe_drop', () => {
 
     const again = await tool.handler(tool.input.parse({ name }), session({ errors: tool.errors }));
     expect(again).toEqual({ name, dropped: false });
+  });
+
+  it('re-raises the canvas canvas_not_found under its own drop recovery, not the staging hint', async () => {
+    const stagingHint =
+      'Re-run the tool that produced this canvas_id to stage fresh data, or verify the id was copied correctly.';
+    const hint =
+      'The canvas holding this dataframe has expired, so nothing is left to drop and no further call is needed.';
+    vi.spyOn(getCanvasBridge() as CanvasBridge, 'drop').mockRejectedValueOnce(
+      notFound('Canvas not found or expired.', {
+        reason: 'canvas_not_found',
+        canvasId: 'CanvasDbl01',
+        recovery: { hint: stagingHint },
+      }),
+    );
+    const result = await runToolContract(tool, { name: 'df_AB12C_3DE45' });
+    expect(toolError(result)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'canvas_not_found', recovery: { hint } },
+    });
+    const text = textOf(result);
+    expect(text).toContain(hint);
+    expect(text).not.toContain(stagingHint);
   });
 
   it.each(['', 'df_ab12c_3de45', 'orders', 'df_AB12C_3DE45; DROP TABLE x'])(
