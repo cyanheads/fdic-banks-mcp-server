@@ -7,23 +7,19 @@
     "source": "github"
   },
   "version": "0.1.2",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://fdic-banks.caseyjhand.com/mcp"
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/fdic-banks-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "0.1.2",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "FDIC_RATE_LIMIT_RPS",
@@ -76,19 +72,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/fdic-banks-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "0.1.2",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "FDIC_RATE_LIMIT_RPS",
           "description": "Maximum request starts per second to api.fdic.gov (1–15), shared by every caller of this process.",
