@@ -378,10 +378,7 @@ describe('fdic_dataframe_describe with listing off', () => {
       );
       expect(error).toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        data: {
-          reason: 'listing_unavailable',
-          recovery: { hint: contractRecovery(tool, 'listing_unavailable') },
-        },
+        data: { reason: 'listing_unavailable' },
       });
       expect(JSON.stringify(error)).not.toContain(stagedName);
       expect(String((error as Error).message)).not.toContain('df_');

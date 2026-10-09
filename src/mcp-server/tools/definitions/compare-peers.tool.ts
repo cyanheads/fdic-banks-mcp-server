@@ -260,7 +260,6 @@ export const comparePeersTool = tool('fdic_compare_peers', {
       throw ctx.fail(
         'conflicting_peer_filters',
         `peer_certs cannot be combined with ${named.join(' and ')}.`,
-        { ...ctx.recoveryFor('conflicting_peer_filters') },
       );
     }
     // Defaulted here, not in the schema, so an explicit band beside peer_certs is caught above.
@@ -274,7 +273,6 @@ export const comparePeersTool = tool('fdic_compare_peers', {
       throw ctx.fail(
         'invalid_state',
         `peer_state "${input.peer_state}" is not a US state, DC, territory, or same.`,
-        { ...ctx.recoveryFor('invalid_state') },
       );
     }
     const metrics = resolveMetrics(input.metrics);
@@ -304,9 +302,7 @@ export const comparePeersTool = tool('fdic_compare_peers', {
       if (profileResult.status === 'rejected') throw profileResult.reason;
       const profile = profileResult.value;
       if (!profile.institution) {
-        throw ctx.fail('cert_not_found', `No FDIC institution record carries CERT ${input.cert}.`, {
-          ...ctx.recoveryFor('cert_not_found'),
-        });
+        throw ctx.fail('cert_not_found', `No FDIC institution record carries CERT ${input.cert}.`);
       }
       if (latestResult.status === 'rejected') {
         if (ctx.signal.aborted) throw latestResult.reason;
@@ -353,7 +349,6 @@ export const comparePeersTool = tool('fdic_compare_peers', {
       throw ctx.fail(
         'own_filing_incomplete',
         `FDIC's ${reportDate} Call Report for CERT ${input.cert} carries no total assets, so peer_asset_band same has no band to resolve to.`,
-        { ...ctx.recoveryFor('own_filing_incomplete') },
       );
     }
     let peerState = peerStateCode;
@@ -363,7 +358,6 @@ export const comparePeersTool = tool('fdic_compare_peers', {
         throw ctx.fail(
           'own_filing_incomplete',
           `FDIC's ${reportDate} Call Report for CERT ${input.cert} carries no headquarters state, so peer_state same has no state to resolve to.`,
-          { ...ctx.recoveryFor('own_filing_incomplete') },
         );
       }
     }

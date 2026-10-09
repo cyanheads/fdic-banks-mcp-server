@@ -282,28 +282,21 @@ export const searchFailuresTool = tool('fdic_search_failures', {
   async handler(input, ctx) {
     const state = input.state === undefined ? undefined : normalizeState(input.state);
     if (input.state !== undefined && state === undefined) {
-      throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`, {
-        ...ctx.recoveryFor('invalid_state'),
-      });
+      throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`);
     }
     const nameTokens = input.name === undefined ? undefined : tokenize(input.name);
     if (nameTokens !== undefined && nameTokens.length === 0) {
-      throw ctx.fail('invalid_name', 'name has no word of two or more letters or digits.', {
-        ...ctx.recoveryFor('invalid_name'),
-      });
+      throw ctx.fail('invalid_name', 'name has no word of two or more letters or digits.');
     }
     for (const date of [input.from_date, input.to_date]) {
       if (date !== undefined && !isCalendarDate(date)) {
-        throw ctx.fail('invalid_date', `${date} is not a real calendar date.`, {
-          ...ctx.recoveryFor('invalid_date'),
-        });
+        throw ctx.fail('invalid_date', `${date} is not a real calendar date.`);
       }
     }
     if (input.from_date && input.to_date && input.from_date > input.to_date) {
       throw ctx.fail(
         'invalid_date_range',
         `from_date ${input.from_date} is after to_date ${input.to_date}.`,
-        { ...ctx.recoveryFor('invalid_date_range') },
       );
     }
 

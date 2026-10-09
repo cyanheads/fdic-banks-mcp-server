@@ -236,15 +236,11 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
   async handler(input, ctx) {
     const state = input.state === undefined ? undefined : normalizeState(input.state);
     if (input.state !== undefined && state === undefined) {
-      throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`, {
-        ...ctx.recoveryFor('invalid_state'),
-      });
+      throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`);
     }
     const name = input.name === undefined ? undefined : normalizeInstitutionName(input.name);
     if (input.name !== undefined && name === undefined) {
-      throw ctx.fail('invalid_name', 'name has no letter or digit to match on.', {
-        ...ctx.recoveryFor('invalid_name'),
-      });
+      throw ctx.fail('invalid_name', 'name has no letter or digit to match on.');
     }
     if (
       input.min_assets !== undefined &&
@@ -254,7 +250,6 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
       throw ctx.fail(
         'invalid_asset_range',
         `min_assets (${input.min_assets}) exceeds max_assets (${input.max_assets}).`,
-        { ...ctx.recoveryFor('invalid_asset_range') },
       );
     }
 

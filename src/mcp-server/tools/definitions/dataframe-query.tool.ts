@@ -190,9 +190,7 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
     if (!bridge) {
-      throw ctx.fail('canvas_unavailable', 'DataCanvas is not configured on this server.', {
-        ...ctx.recoveryFor('canvas_unavailable'),
-      });
+      throw ctx.fail('canvas_unavailable', 'DataCanvas is not configured on this server.');
     }
     // preview above row_limit would be refused by the canvas; row_limit already bounds it.
     const preview =

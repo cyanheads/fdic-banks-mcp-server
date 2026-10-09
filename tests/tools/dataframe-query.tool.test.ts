@@ -3,7 +3,8 @@
  * canvas: canvas_unavailable, the zero-row page, preview- and row_limit-bound
  * pages, preview clamped to row_limit, register_as with an exact count, every
  * SQL rejection rethrown under this tool's reason with its contract recovery,
- * register_as_clash on one tenant's state, register_as_too_large past the
+ * register_as_clash on one tenant's state and its contract recovery,
+ * register_as_too_large past the
  * staging budget, blank and malformed inputs, and result values in both
  * structuredContent and the rendered table.
  * @module tests/tools/dataframe-query.tool.test
@@ -11,11 +12,15 @@
 
 import type { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
-import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  type CanvasBridge,
+  getCanvasBridge,
+  initCanvasBridge,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { createDuckdbCanvas, tenantSession } from '../helpers/canvas.js';
 import { contractRecovery, structured, textOf, toolError } from '../helpers/tool-results.js';
 
@@ -38,6 +43,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   initCanvasBridge(undefined);
   await duck.shutdown(createMockContext());
 });
@@ -247,11 +253,26 @@ describe('SQL rejections', () => {
       ),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'register_as_clash', tableName: name },
+    });
+  });
+
+  it('carries the register_as_clash recovery the bridge leaves to the contract, on both surfaces', async () => {
+    vi.spyOn(getCanvasBridge() as CanvasBridge, 'query').mockRejectedValueOnce(
+      validationError('A dataframe named df_AB12C_3DE45 already exists.', {
+        reason: 'register_as_clash',
+        tableName: 'df_AB12C_3DE45',
+      }),
+    );
+    const { result, text } = await run({ sql: 'SELECT 1', register_as: 'df_AB12C_3DE45' });
+    expect(toolError(result)).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'register_as_clash',
         recovery: { hint: contractRecovery(tool, 'register_as_clash') },
       },
     });
+    expect(text).toContain(contractRecovery(tool, 'register_as_clash'));
   });
 
   it.each<[string, Record<string, unknown>]>([

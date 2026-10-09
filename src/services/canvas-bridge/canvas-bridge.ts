@@ -124,20 +124,16 @@ function reasonOf(err: unknown): string | undefined {
 }
 
 /**
- * A framework rejection under the calling tool's declared reason, carrying that
- * tool's contract recovery. Anything else passes through unchanged.
+ * A framework rejection under the calling tool's declared reason, with the
+ * framework's own hint removed so the framework fills in that tool's contract
+ * recovery. Anything else passes through unchanged.
  */
-function withContractRecovery(err: unknown, ctx: Context): unknown {
+function underDeclaredReason(err: unknown): unknown {
   const raised = reasonOf(err);
   const reason = raised === undefined ? undefined : DECLARED_REASON[raised];
   if (!(err instanceof McpError) || reason === undefined) return err;
-  const data = isRecord(err.data) ? err.data : {};
-  return new McpError(
-    err.code,
-    err.message,
-    { ...data, reason, ...ctx.recoveryFor(reason) },
-    { cause: err },
-  );
+  const { recovery: _frameworkHint, ...data } = isRecord(err.data) ? err.data : {};
+  return new McpError(err.code, err.message, { ...data, reason }, { cause: err });
 }
 
 /**
@@ -148,7 +144,7 @@ function withContractRecovery(err: unknown, ctx: Context): unknown {
  */
 export function stripStringLiterals(sql: string): string {
   return sql.replace(
-    /'(?:[^'\\]|\\[\s\S]?|'')*(?:'|$)|"(?:[^"\\]|\\[\s\S]?|"")*(?:"|$)/g,
+    /'(?:[^'\\]|\\(?:[\s\S]|$)|'')*(?:'|$)|"(?:[^"\\]|\\(?:[\s\S]|$)|"")*(?:"|$)/g,
     (literal) => (literal.startsWith("'") ? "''" : '""'),
   );
 }
@@ -247,11 +243,7 @@ export class CanvasBridge {
     if (registerAs && (await ctx.state.get(`${META_PREFIX}${registerAs}`)) !== null) {
       throw validationError(
         `A dataframe named ${registerAs} already exists; register_as needs an unused name.`,
-        {
-          reason: 'register_as_clash',
-          tableName: registerAs,
-          ...ctx.recoveryFor('register_as_clash'),
-        },
+        { reason: 'register_as_clash', tableName: registerAs },
       );
     }
     const instance = live ?? (await this.createSharedCanvas(ctx));
@@ -266,7 +258,7 @@ export class CanvasBridge {
         signal: ctx.signal,
       });
     } catch (err) {
-      throw withContractRecovery(err, ctx);
+      throw underDeclaredReason(err);
     }
     if (!result.tableName) return { result };
 
@@ -280,7 +272,6 @@ export class CanvasBridge {
           tableName,
           rowCount: result.rowCount,
           maxStagedRows: this.maxStagedRows,
-          ...ctx.recoveryFor('register_as_too_large'),
         },
       );
     }
@@ -321,11 +312,7 @@ export class CanvasBridge {
       if ((await ctx.state.get(`${META_PREFIX}${name}`)) === null) {
         throw notFound(
           `Dataframe ${name} does not exist: it expired, was dropped to make room for newer dataframes, or was never staged.`,
-          {
-            reason: 'missing_table',
-            tableName: name,
-            ...ctx.recoveryFor('missing_table'),
-          },
+          { reason: 'missing_table', tableName: name },
         );
       }
     }

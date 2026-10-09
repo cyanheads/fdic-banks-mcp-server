@@ -3,7 +3,8 @@
  * staging under minted df_ names with provenance kept in ctx.state, one shared
  * canvas per tenant, describe ordering and paging, SQL through the read-only
  * gate with framework rejections rethrown under fdic_dataframe_query's contract
- * reasons and recovery, the linear string-literal scan behind the missing_table
+ * reasons (its recovery filled in by the framework, asserted in the tool tests),
+ * the linear string-literal scan behind the missing_table
  * pre-check, register_as provenance, drop, the staging budget's oldest-first
  * eviction and register_as_too_large, the lazy TTL sweep, canvas expiry,
  * staging failure and cancellation, tenant isolation, and the listing option.
@@ -292,7 +293,7 @@ describe('canvas expiry', () => {
     expect(lost?.name).not.toBe(fresh?.name);
   });
 
-  it('answers a query on a dataframe of an expired canvas as missing_table with the contract recovery', async () => {
+  it('answers a query on a dataframe of an expired canvas as missing_table', async () => {
     const lost = await bridge.stage(session(), stageOptions());
     vi.setSystemTime(T0.getTime() + 2 * 3_600_000);
 
@@ -300,10 +301,7 @@ describe('canvas expiry', () => {
       bridge.query(queryCtx(), `SELECT * FROM ${lost?.name}`, { rowLimit: 10 }),
     );
     expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(error.data).toMatchObject({
-      reason: 'missing_table',
-      recovery: { hint: contractRecovery(dataframeQueryTool, 'missing_table') },
-    });
+    expect(error.data).toEqual({ reason: 'missing_table', tableName: lost?.name });
     expect(await bridge.describe(session())).toEqual([]);
   });
 
@@ -378,17 +376,13 @@ describe('query', () => {
     expect(again.result.rows).toEqual([{ total: 2.32 }]);
   });
 
-  it('refuses register_as naming a staged dataframe as register_as_clash with the contract recovery', async () => {
+  it('refuses register_as naming a staged dataframe as register_as_clash', async () => {
     const name = (await bridge.stage(session(), stageOptions()))?.name ?? '';
     const error = await rejection(
       bridge.query(queryCtx(), 'SELECT 1 AS x', { rowLimit: 10, registerAs: name }),
     );
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
-    expect(error.data).toEqual({
-      reason: 'register_as_clash',
-      tableName: name,
-      recovery: { hint: contractRecovery(dataframeQueryTool, 'register_as_clash') },
-    });
+    expect(error.data).toEqual({ reason: 'register_as_clash', tableName: name });
   });
 
   it('fails a referenced df_ name that is not staged as missing_table, ignoring names in string literals', async () => {
@@ -397,11 +391,7 @@ describe('query', () => {
       bridge.query(queryCtx(), 'SELECT * FROM df_ZZZZZ_ZZZZZ', { rowLimit: 10 }),
     );
     expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(error.data).toEqual({
-      reason: 'missing_table',
-      tableName: 'df_ZZZZZ_ZZZZZ',
-      recovery: { hint: contractRecovery(dataframeQueryTool, 'missing_table') },
-    });
+    expect(error.data).toEqual({ reason: 'missing_table', tableName: 'df_ZZZZZ_ZZZZZ' });
 
     const { result } = await bridge.query(
       queryCtx(),
@@ -425,16 +415,18 @@ describe('query', () => {
     ],
     ['missing_table', 'SELECT * FROM staging_scratch', JsonRpcErrorCode.NotFound],
   ])(
-    'rethrows the framework %s with the contract recovery, keeping its code and cause',
+    'rethrows the framework %s under the declared reason without the framework hint, keeping its code and cause',
     async (reason, sql, code) => {
       const error = await rejection(bridge.query(queryCtx(), sql, { rowLimit: 10 }));
-      const hint = contractRecovery(dataframeQueryTool, reason);
       expect(error.code).toBe(code);
-      expect(error.data).toMatchObject({ reason, recovery: { hint } });
+      expect(error.data).toMatchObject({ reason });
+      expect(error.data).not.toHaveProperty('recovery');
       expect(error.cause).toBeInstanceOf(McpError);
       const cause = error.cause as McpError;
       expect(cause.data).toMatchObject({ reason });
-      expect((cause.data as { recovery?: { hint?: string } }).recovery?.hint).not.toBe(hint);
+      expect((cause.data as { recovery?: { hint?: string } }).recovery?.hint).not.toBe(
+        contractRecovery(dataframeQueryTool, reason),
+      );
     },
   );
 
@@ -459,11 +451,7 @@ describe('query', () => {
       new CanvasBridge(double).query(queryCtx(), 'SELECT 1', { rowLimit: 10 }),
     );
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
-    expect(error.data).toEqual({
-      reason: 'denied_function',
-      functions: ['read_json'],
-      recovery: { hint: contractRecovery(dataframeQueryTool, 'denied_function') },
-    });
+    expect(error.data).toEqual({ reason: 'denied_function', functions: ['read_json'] });
     expect(error.cause).toBe(planError);
   });
 
@@ -534,6 +522,24 @@ describe('stripStringLiterals', () => {
     expect(stripStringLiterals("SELECT * FROM df_ZZZZZ_ZZZZZ WHERE x = 'open \\")).toBe(
       "SELECT * FROM df_ZZZZZ_ZZZZZ WHERE x = ''",
     );
+  });
+
+  it.each([
+    ['a trailing lone backslash in a single-quoted literal', "SELECT 'a\\", "SELECT ''"],
+    ['a trailing lone backslash in a double-quoted literal', 'SELECT "a\\', 'SELECT ""'],
+    ['an escaped backslash before the closing quote', "SELECT 'a\\\\' FROM t", "SELECT '' FROM t"],
+    ['an escaped single quote', "SELECT 'it\\'s' FROM t", "SELECT '' FROM t"],
+    ['an escaped double quote', 'SELECT "say \\"hi\\"" FROM t', 'SELECT "" FROM t'],
+    ['a doubled single quote', "SELECT 'O''Brien', 'x' FROM t", "SELECT '', '' FROM t"],
+    ['a doubled double quote', 'SELECT "a""b" FROM t', 'SELECT "" FROM t'],
+    [
+      'an unterminated single-quoted literal',
+      "SELECT * FROM t WHERE x = 'open",
+      "SELECT * FROM t WHERE x = ''",
+    ],
+    ['an unterminated double-quoted literal', 'SELECT "open FROM t', 'SELECT ""'],
+  ])('blanks %s', (_label, sql, expected) => {
+    expect(stripStringLiterals(sql)).toBe(expected);
   });
 });
 
@@ -641,7 +647,6 @@ describe('staging budget', () => {
       tableName: 'df_DERIV_00001',
       rowCount: 6,
       maxStagedRows: 5,
-      recovery: { hint: contractRecovery(dataframeQueryTool, 'register_as_too_large') },
     });
     expect(error.message).toContain('6 rows');
     expect(error.message).toContain('5-row');

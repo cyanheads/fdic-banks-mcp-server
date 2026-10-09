@@ -257,9 +257,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
   async handler(input, ctx) {
     const state = input.state === undefined ? undefined : normalizeState(input.state);
     if (input.state !== undefined && state === undefined) {
-      throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`, {
-        ...ctx.recoveryFor('invalid_state'),
-      });
+      throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`);
     }
     if (
       input.min_assets !== undefined &&
@@ -269,7 +267,6 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       throw ctx.fail(
         'invalid_asset_range',
         `min_assets (${input.min_assets}) exceeds max_assets (${input.max_assets}).`,
-        { ...ctx.recoveryFor('invalid_asset_range') },
       );
     }
     const metricFilters: MetricFilter[] = [];
@@ -278,14 +275,12 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
         throw ctx.fail(
           'invalid_metric_filter',
           `metric_filters[${index}] (${f.metric}) has neither min nor max.`,
-          { ...ctx.recoveryFor('invalid_metric_filter') },
         );
       }
       if (f.min !== undefined && f.max !== undefined && f.min > f.max) {
         throw ctx.fail(
           'invalid_metric_filter',
           `metric_filters[${index}] (${f.metric}) has min ${f.min} above max ${f.max}.`,
-          { ...ctx.recoveryFor('invalid_metric_filter') },
         );
       }
       metricFilters.push({
@@ -297,9 +292,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
     const fromInput = input.from_date === undefined ? undefined : reportDateToIso(input.from_date);
     const toInput = input.to_date === undefined ? undefined : reportDateToIso(input.to_date);
     if (fromInput && toInput && fromInput > toInput) {
-      throw ctx.fail('invalid_date_range', `from_date ${fromInput} is after to_date ${toInput}.`, {
-        ...ctx.recoveryFor('invalid_date_range'),
-      });
+      throw ctx.fail('invalid_date_range', `from_date ${fromInput} is after to_date ${toInput}.`);
     }
 
     const metrics = [

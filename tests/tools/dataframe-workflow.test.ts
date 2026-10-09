@@ -35,7 +35,6 @@ import {
   installFakeService,
   requestedQuarters,
 } from '../helpers/fake-fdic.js';
-import { contractRecovery } from '../helpers/tool-results.js';
 
 const T0 = new Date('2026-09-26T12:00:00.000Z');
 const HARBOR = { NAME: 'EVERGREEN HARBOR BK', STALP: 'WA' };
@@ -204,10 +203,7 @@ ORDER BY p.report_date DESC`;
       ),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: {
-        reason: 'missing_table',
-        recovery: { hint: contractRecovery(dataframeQueryTool, 'missing_table') },
-      },
+      data: { reason: 'missing_table', tableName: panelName },
     });
 
     const survivors = await dataframeQueryTool.handler(

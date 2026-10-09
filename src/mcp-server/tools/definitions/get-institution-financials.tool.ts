@@ -176,9 +176,7 @@ export const getInstitutionFinancialsTool = tool('fdic_get_institution_financial
     const from = input.from_date === undefined ? undefined : reportDateToIso(input.from_date);
     const to = input.to_date === undefined ? undefined : reportDateToIso(input.to_date);
     if (from && to && from > to) {
-      throw ctx.fail('invalid_date_range', `from_date ${from} is after to_date ${to}.`, {
-        ...ctx.recoveryFor('invalid_date_range'),
-      });
+      throw ctx.fail('invalid_date_range', `from_date ${from} is after to_date ${to}.`);
     }
     const metrics = resolveMetrics(input.metrics);
 
@@ -203,9 +201,7 @@ export const getInstitutionFinancialsTool = tool('fdic_get_institution_financial
     if (profileResult.status === 'rejected') throw profileResult.reason;
     const inst = profileResult.value.institution;
     if (!inst) {
-      throw ctx.fail('cert_not_found', `No FDIC institution record carries CERT ${input.cert}.`, {
-        ...ctx.recoveryFor('cert_not_found'),
-      });
+      throw ctx.fail('cert_not_found', `No FDIC institution record carries CERT ${input.cert}.`);
     }
     if (historyResult.status === 'rejected') throw historyResult.reason;
     const history = historyResult.value;

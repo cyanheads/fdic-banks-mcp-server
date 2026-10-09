@@ -154,15 +154,12 @@ export const dataframeDescribeTool = tool('fdic_dataframe_describe', {
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
     if (!bridge) {
-      throw ctx.fail('canvas_unavailable', 'DataCanvas is not configured on this server.', {
-        ...ctx.recoveryFor('canvas_unavailable'),
-      });
+      throw ctx.fail('canvas_unavailable', 'DataCanvas is not configured on this server.');
     }
     if (!input.name && !bridge.listing) {
       throw ctx.fail(
         'listing_unavailable',
         'Listing dataframes is off on this deployment: every caller shares one canvas, so a dataframe is reached only by its name.',
-        { ...ctx.recoveryFor('listing_unavailable') },
       );
     }
     const entries = await bridge.describe(ctx, input.name);

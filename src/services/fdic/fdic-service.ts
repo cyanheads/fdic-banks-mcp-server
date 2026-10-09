@@ -265,7 +265,8 @@ function retryAfterSeconds(value: unknown): number | undefined {
 /**
  * The calling tool's recovery for a rate-limit reason with the wait filled in: the
  * contract text says `retryAfter seconds`, which names the number only in
- * `data.retryAfter`, out of reach of a client that reads `content[]` alone.
+ * `data.retryAfter`, out of reach of a client that reads `content[]` alone. With no
+ * wait to name, nothing is set and the framework fills in the contract text as is.
  */
 function waitRecovery(
   reason: 'pacer_shed' | 'upstream_rate_limited',
@@ -273,7 +274,7 @@ function waitRecovery(
   ctx: Context,
 ) {
   const resolved = ctx.recoveryFor(reason);
-  if (seconds === undefined || !('recovery' in resolved)) return resolved;
+  if (seconds === undefined || !('recovery' in resolved)) return {};
   const wait = `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
   return { recovery: { hint: resolved.recovery.hint.replace('retryAfter seconds', wait) } };
 }

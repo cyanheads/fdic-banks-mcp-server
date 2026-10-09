@@ -343,20 +343,14 @@ export const getDepositsTool = tool('fdic_get_deposits', {
       input.zip !== undefined ||
       input.msa_code !== undefined;
     if (input.cert === undefined && !geographyGiven) {
-      throw ctx.fail('no_scope', 'Pass cert, a geography, or both.', {
-        ...ctx.recoveryFor('no_scope'),
-      });
+      throw ctx.fail('no_scope', 'Pass cert, a geography, or both.');
     }
     if ((input.county !== undefined || input.city !== undefined) && input.state === undefined) {
-      throw ctx.fail('location_requires_state', 'county and city need state alongside them.', {
-        ...ctx.recoveryFor('location_requires_state'),
-      });
+      throw ctx.fail('location_requires_state', 'county and city need state alongside them.');
     }
     const state = input.state === undefined ? undefined : normalizeState(input.state);
     if (input.state !== undefined && state === undefined) {
-      throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`, {
-        ...ctx.recoveryFor('invalid_state'),
-      });
+      throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`);
     }
     const county = input.county?.replace(/\s+county$/i, '');
     const geography: SodGeography | undefined = geographyGiven
