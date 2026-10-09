@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "fdic-banks-mcp-server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share.",
   "author": { "name": "cyanheads" },
   "homepage": "https://github.com/cyanheads/fdic-banks-mcp-server#readme",

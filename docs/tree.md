@@ -1,6 +1,6 @@
 # fdic-banks-mcp-server - Directory Structure
 
-Generated on: 2026-09-26 19:39:28
+Generated on: 2026-10-09 08:53:16
 
 ```text
 fdic-banks-mcp-server/
@@ -126,9 +126,11 @@ fdic-banks-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/

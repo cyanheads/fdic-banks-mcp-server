@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/fdic-banks-mcp-server",
     "source": "github"
   },
-  "version": "0.1.2",
+  "version": "0.1.3",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/fdic-banks-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "environmentVariables": [
         {
           "name": "FDIC_RATE_LIMIT_RPS",
@@ -73,7 +73,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/fdic-banks-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "environmentVariables": [
         {
           "name": "MCP_TRANSPORT_TYPE",
