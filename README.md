@@ -19,11 +19,17 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://fdic-banks.caseyjhand.com/mcp](https://fdic-banks.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Overview
 
-US bank data from the [FDIC BankFind Suite API](https://api.fdic.gov/banks/docs/), which is public and needs no API key. Find any FDIC-insured bank or savings institution, including closed, merged, and failed ones, then read its quarterly Call Report financials back to 1984, rank it against peers, screen many banks at once, search failures since 1934, and map branch deposits and market share. Runs as a stdio process or a local Streamable HTTP server.
+US bank data from the [FDIC BankFind Suite API](https://api.fdic.gov/banks/docs/), which is public and needs no API key. Find any FDIC-insured bank or savings institution, including closed, merged, and failed ones, then read its quarterly Call Report financials back to 1984, rank it against peers, screen many banks at once, search failures since 1934, and map branch deposits and market share. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 Institutions are keyed by their FDIC certificate number (CERT), which survives renames and charter conversions. Credit unions are insured by the NCUA and are not in this data.
 
@@ -149,6 +155,25 @@ Agent-friendly output:
 - Staged dataframes keep their provenance and per-column units, so SQL results stay interpretable
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://fdic-banks.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "fdic-banks-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://fdic-banks.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+Every caller of the hosted instance shares one FDIC request pacer and one dataframe workspace, so `fdic_dataframe_describe` takes a table's exact name there; listing is off.
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file. No API key is needed.
 
