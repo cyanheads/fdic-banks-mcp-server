@@ -1,6 +1,6 @@
 # fdic-banks-mcp-server - Directory Structure
 
-Generated on: 2026-10-09 08:53:16
+Generated on: 2026-10-16 17:24:21
 
 ```text
 fdic-banks-mcp-server/
@@ -25,6 +25,7 @@ fdic-banks-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -151,7 +152,8 @@ fdic-banks-mcp-server/
 │   │       │   ├── search-failures.tool.ts
 │   │       │   └── search-institutions.tool.ts
 │   │       ├── input-schemas.ts
-│   │       └── markdown.ts
+│   │       ├── markdown.ts
+│   │       └── read-bounds.ts
 │   ├── services/
 │   │   ├── canvas-bridge/
 │   │   │   └── canvas-bridge.ts
@@ -192,6 +194,7 @@ fdic-banks-mcp-server/
 │   │   ├── wave1-definitions.smoke.test.ts
 │   │   └── wave2-definitions.smoke.test.ts
 │   ├── tools/
+│   │   ├── bounded-requests.test.ts
 │   │   ├── compare-peers.tool.test.ts
 │   │   ├── dataframe-describe.tool.test.ts
 │   │   ├── dataframe-drop.tool.test.ts
