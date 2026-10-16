@@ -35,6 +35,13 @@ import type { MetricFilter, PanelFilters, PanelRow } from '@/services/fdic/types
 import { normalizeState } from '@/services/fdic/us-states.js';
 import { blankAsUnset, metricEnum, reportDateInput, stateInput } from '../input-schemas.js';
 import { cell, inline, metricValue, num } from '../markdown.js';
+import {
+  certSelectionFields,
+  certSelectionTrailer,
+  metricSelectionFields,
+  metricSelectionTrailer,
+  partitionSelection,
+} from '../read-bounds.js';
 
 const MetricDefinitionSchema = z
   .object({
@@ -76,9 +83,12 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
   input: z.object({
     certs: z
       .array(z.number().int().min(1).describe('FDIC certificate number.'))
-      .max(100)
+      .min(1, 'Provide at least one CERT, or omit certs for an unrestricted panel.')
+      .max(1000)
       .optional()
-      .describe('Up to 100 CERTs to include; omit to screen every filer.'),
+      .describe(
+        'Nonempty selection, at most 1000 raw CERTs. Deduplicated before querying the first 100; deferred_certs holds the rest for another call. Omit to screen every filer.',
+      ),
     state: stateInput(
       'Headquarters state: two-letter code in any case or full name. Branch locations are in fdic_get_deposits.',
     ),
@@ -109,10 +119,10 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       ),
     metrics: z
       .array(metricEnum)
-      .max(30)
+      .max(1000)
       .optional()
       .describe(
-        'Up to 30 metric names (fdic_list_reference topic metrics) to return. Omit for the default health set.',
+        'At most 1000 raw metric names. Deduplicated before querying the first 30; deferred_metrics holds the rest. Sort/filter metrics are always added. Omit or pass [] for the default health set.',
       ),
     from_date: reportDateInput(
       'Earliest quarter: a quarter-end date (2024-03-31), the same without dashes, or a quarter label (2024Q1). Omit for to_date alone.',
@@ -126,8 +136,8 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
     sort_order: blankAsUnset(z.enum(['asc', 'desc']).default('desc')).describe(
       'desc (default, largest first) or asc; applies to sort_by. Rows without a value sort last.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(500).default(50)).describe(
-      'Rows returned inline (1–500). A panel with more rows is also staged whole as a dataframe when this deployment stages dataframes.',
+    limit: blankAsUnset(z.number().int().min(1).default(50)).describe(
+      'Positive inline preview count, bounded by the already-fetched panel. A larger panel is staged whole as a dataframe when this deployment stages dataframes.',
     ),
   }),
 
@@ -192,6 +202,8 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
   }),
 
   enrichment: {
+    ...certSelectionFields,
+    ...metricSelectionFields,
     notice: z
       .string()
       .optional()
@@ -204,6 +216,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
     cap: z.number().optional().describe('The limit applied to the preview.'),
   },
 
+  enrichmentTrailer: { ...certSelectionTrailer, ...metricSelectionTrailer },
   errors: [
     {
       reason: 'invalid_state',
@@ -295,14 +308,34 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       throw ctx.fail('invalid_date_range', `from_date ${fromInput} is after to_date ${toInput}.`);
     }
 
+    const projection = partitionSelection(resolveMetrics(input.metrics), 30);
     const metrics = [
       ...new Set<MetricName>([
-        ...resolveMetrics(input.metrics),
+        ...projection.processed,
         ...metricFilters.map((f) => f.metric),
         ...(input.sort_by ? [input.sort_by] : []),
       ]),
     ];
-    const certs = input.certs?.length ? [...new Set(input.certs)] : undefined;
+    const selected = input.certs === undefined ? undefined : partitionSelection(input.certs, 100);
+    const certs = selected?.processed;
+    const deferredMetrics = projection.deferred.filter((metric) => !metrics.includes(metric));
+    const selectionNotes: string[] = [];
+    if (selected?.deferred.length)
+      selectionNotes.push(
+        'Panel totals, staged rows, and filters cover only processed_certs. Pass deferred_certs as certs in a new call.',
+      );
+    if (deferredMetrics.length)
+      selectionNotes.push(
+        'Pass deferred_metrics as metrics in a new call for the remaining projection. Sort/filter metrics are always processed.',
+      );
+    ctx.enrich({
+      processed_metrics: metrics,
+      deferred_metrics: deferredMetrics,
+      ...(selected
+        ? { processed_certs: selected.processed, deferred_certs: selected.deferred }
+        : {}),
+      ...(selectionNotes.length ? { selection_notice: selectionNotes.join(' ') } : {}),
+    });
     // A minimum of 0 bounds nothing; a form client sends it for an untouched field.
     const minAssets = input.min_assets || undefined;
     const filters: PanelFilters = {
@@ -356,7 +389,14 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       bridge && panel.length > input.limit
         ? await bridge.stage(ctx, {
             sourceTool: 'fdic_query_financials',
-            queryParams: { ...input },
+            queryParams: {
+              ...input,
+              ...(certs ? { certs } : {}),
+              ...(state ? { state } : {}),
+              metrics,
+              from_date: from,
+              to_date: to,
+            },
             rows: panel.map((row) => ({
               cert: row.cert,
               name: row.name,
@@ -430,7 +470,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       }
       if (dataset) notes.push(stagedNotice(dataset));
       else if (panel.length > preview.length) {
-        notes.push('Raise limit (max 500) or narrow the filters to see the rest inline.');
+        notes.push('Raise limit or narrow the filters to see the rest inline.');
       }
       if (panel.length > preview.length) {
         ctx.enrich.truncated({

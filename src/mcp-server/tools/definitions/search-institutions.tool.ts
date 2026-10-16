@@ -14,6 +14,7 @@ import type { InstitutionStatus } from '@/services/fdic/types.js';
 import { normalizeState } from '@/services/fdic/us-states.js';
 import { blankAsUnset, stateInput } from '../input-schemas.js';
 import { inline, num } from '../markdown.js';
+import { certSelectionFields, certSelectionTrailer, partitionSelection } from '../read-bounds.js';
 
 const STATUSES = ['active', 'inactive', 'any'] as const;
 
@@ -115,10 +116,11 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
     ),
     certs: z
       .array(z.number().int().min(1).describe('FDIC certificate number.'))
-      .max(50)
+      .min(1, 'Provide at least one CERT, or omit certs for an unrestricted search.')
+      .max(1000)
       .optional()
       .describe(
-        'Exact lookup by up to 50 CERTs; requested CERTs with no record come back in missing_certs.',
+        'Nonempty CERT selection, at most 1000 raw items. Deduplicated first; the first 50 are queried and the rest returned as deferred_certs. missing_certs covers only processed_certs.',
       ),
     state: stateInput(
       'Headquarters state: two-letter code in any case (wa) or full name (Washington); DC and territories accepted.',
@@ -137,7 +139,8 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
             'Charter class code, uppercase; fdic_list_reference topic bank_classes lists them.',
           ),
       )
-      .max(8)
+      .min(1, 'Provide at least one bank class, or omit bank_classes for all classes.')
+      .max(1000)
       .optional()
       .describe(
         'Charter classes to include: N national bank, NM state nonmember bank, SM state member bank, SB federal savings bank, SI state savings bank, SL state savings and loan, OI insured branch of a foreign bank, NC noninsured non-deposit trust company.',
@@ -154,8 +157,8 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
     sort: blankAsUnset(z.enum(['relevance', 'assets_desc', 'name']).optional()).describe(
       'relevance (active institutions whose current name holds every word of name first, then every other match, each by match score; default when name is given — without name it falls back to assets_desc), assets_desc (largest first; the default otherwise), or name (A–Z).',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(100).default(20)).describe(
-      'Institutions per page (1–100).',
+    limit: blankAsUnset(z.number().int().min(1).max(10_000).default(20)).describe(
+      'Institutions per page; accepts 1–10000, executes at most 100. effective_limit reports the applied count; use next_offset to continue.',
     ),
     offset: blankAsUnset(z.number().int().min(0).max(100_000).default(0)).describe(
       'Matches to skip (0–100,000); pass next_offset from the previous page.',
@@ -181,6 +184,8 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
   }),
 
   enrichment: {
+    ...certSelectionFields,
+    effective_limit: z.number().int().optional().describe('Page size applied, at most 100.'),
     notice: z
       .string()
       .optional()
@@ -190,6 +195,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
     cap: z.number().optional().describe('The limit applied to this page.'),
   },
 
+  enrichmentTrailer: certSelectionTrailer,
   errors: [
     {
       reason: 'invalid_state',
@@ -253,8 +259,21 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
       );
     }
 
-    const certs = input.certs?.length ? [...new Set(input.certs)] : undefined;
-    const bankClasses = input.bank_classes?.length ? input.bank_classes : undefined;
+    const selected = input.certs === undefined ? undefined : partitionSelection(input.certs, 50);
+    const certs = selected?.processed;
+    const limit = Math.min(input.limit, 100);
+    ctx.enrich({
+      effective_limit: limit,
+      ...(selected ? { processed_certs: certs, deferred_certs: selected.deferred } : {}),
+      ...(selected?.deferred.length
+        ? {
+            selection_notice:
+              'Only processed_certs were queried. Pass deferred_certs as certs in a new call; missing_certs never includes deferred CERTs.',
+          }
+        : {}),
+    });
+    const bankClasses =
+      input.bank_classes === undefined ? undefined : [...new Set(input.bank_classes)];
     // A minimum of 0 bounds nothing; as a range clause it would also drop records with no recorded assets.
     const minAssets = input.min_assets || undefined;
     const lookup = name !== undefined || certs !== undefined;
@@ -276,7 +295,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
         ? { holdingCompanyRssd: input.holding_company_rssd }
         : {}),
       sort,
-      limit: input.limit,
+      limit,
       offset: input.offset,
     };
 
@@ -292,7 +311,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
       input.max_assets !== undefined ||
       input.holding_company_rssd !== undefined;
     const pageProvesExistence =
-      certs !== undefined && !narrowed && input.offset === 0 && certs.length <= input.limit;
+      certs !== undefined && !narrowed && input.offset === 0 && certs.length <= limit;
 
     const service = getFdicService();
     const budget = callBudget();
@@ -340,7 +359,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
     } else if (hasMore) {
       ctx.enrich.truncated({
         shown: page.rows.length,
-        cap: input.limit,
+        cap: limit,
         guidance: `Showing matches ${input.offset + 1}–${end} of ${page.total}; pass offset ${end} for the next page, or narrow the filters.`,
       });
     }

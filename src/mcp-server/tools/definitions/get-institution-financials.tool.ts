@@ -16,6 +16,11 @@ import {
 import { reportDateToIso } from '@/services/fdic/query-builder.js';
 import { blankAsUnset, metricEnum, reportDateInput } from '../input-schemas.js';
 import { cell, inline, metricValue, num } from '../markdown.js';
+import {
+  metricSelectionFields,
+  metricSelectionTrailer,
+  partitionSelection,
+} from '../read-bounds.js';
 
 const MetricDefinitionSchema = z
   .object({
@@ -45,13 +50,13 @@ export const getInstitutionFinancialsTool = tool('fdic_get_institution_financial
       .describe('FDIC certificate number, from fdic_search_institutions.'),
     metrics: z
       .array(metricEnum)
-      .max(25)
+      .max(1000)
       .optional()
       .describe(
-        'Up to 25 metric names (fdic_list_reference topic metrics). Omit for the default health set: assets, deposits, uninsured deposits, equity, net income, ROA, ROE, net interest margin, efficiency, noncurrent-loan and charge-off rates, loans to deposits, and capital ratios.',
+        'At most 1000 raw metric names (fdic_list_reference topic metrics). Deduplicated before querying the first 25; deferred_metrics holds the rest. Omit or pass [] for the default health set.',
       ),
-    quarters: blankAsUnset(z.number().int().min(1).max(200).default(8)).describe(
-      'Most recent quarters to return (1–200; 200 covers the whole history back to 1984). Within from_date/to_date it caps the count.',
+    quarters: blankAsUnset(z.number().int().min(1).max(10_000).default(8)).describe(
+      'Most recent quarters to return; accepts 1–10000, executes at most 200 within from_date/to_date. effective_quarters reports the applied count. Continue with to_date before the oldest returned quarter.',
     ),
     from_date: reportDateInput(
       'Earliest quarter to include: a quarter-end date (2025-03-31), the same without dashes (20250331), or a quarter label (2025Q1).',
@@ -122,6 +127,12 @@ export const getInstitutionFinancialsTool = tool('fdic_get_institution_financial
   }),
 
   enrichment: {
+    ...metricSelectionFields,
+    effective_quarters: z
+      .number()
+      .int()
+      .optional()
+      .describe('Quarters execution cap applied, at most 200.'),
     notice: z
       .string()
       .optional()
@@ -136,6 +147,7 @@ export const getInstitutionFinancialsTool = tool('fdic_get_institution_financial
     cap: z.number().optional().describe('The quarters cap applied.'),
   },
 
+  enrichmentTrailer: metricSelectionTrailer,
   errors: [
     {
       reason: 'cert_not_found',
@@ -178,7 +190,24 @@ export const getInstitutionFinancialsTool = tool('fdic_get_institution_financial
     if (from && to && from > to) {
       throw ctx.fail('invalid_date_range', `from_date ${from} is after to_date ${to}.`);
     }
-    const metrics = resolveMetrics(input.metrics);
+    const projection = partitionSelection(resolveMetrics(input.metrics), 25);
+    const metrics = projection.processed;
+    const quarters = Math.min(input.quarters, 200);
+    const selectionNotes: string[] = [];
+    if (projection.deferred.length)
+      selectionNotes.push(
+        'Pass deferred_metrics as metrics in a new call to retrieve the remaining projection.',
+      );
+    if (input.quarters > quarters)
+      selectionNotes.push(
+        'At most 200 quarters are queried; continue with to_date before the oldest returned quarter.',
+      );
+    ctx.enrich({
+      processed_metrics: metrics,
+      deferred_metrics: projection.deferred,
+      effective_quarters: quarters,
+      ...(selectionNotes.length ? { selection_notice: selectionNotes.join(' ') } : {}),
+    });
 
     const service = getFdicService();
     const budget = callBudget();
@@ -190,7 +219,7 @@ export const getInstitutionFinancialsTool = tool('fdic_get_institution_financial
         {
           cert: input.cert,
           metrics,
-          limit: input.quarters,
+          limit: quarters,
           ...(from ? { from } : {}),
           ...(to ? { to } : {}),
         },
@@ -232,11 +261,11 @@ export const getInstitutionFinancialsTool = tool('fdic_get_institution_financial
     const truncated = history.total > history.rows.length && history.rows.length > 0;
     if (truncated) {
       notices.push(
-        `Showing the latest ${history.rows.length} of ${history.total} quarters; raise quarters or narrow from_date/to_date.`,
+        `Showing the latest ${history.rows.length} of ${history.total} quarters; raise quarters up to 200 or continue with to_date before the oldest returned quarter.`,
       );
       ctx.enrich.truncated({
         shown: history.rows.length,
-        cap: input.quarters,
+        cap: quarters,
         guidance: notices.join(' '),
       });
     } else if (notices.length) {

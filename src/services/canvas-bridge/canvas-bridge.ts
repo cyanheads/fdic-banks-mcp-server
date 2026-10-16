@@ -18,7 +18,7 @@ import type {
   DataCanvas,
   QueryResult,
 } from '@cyanheads/mcp-ts-core/canvas';
-import { McpError, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 
@@ -133,20 +133,11 @@ function underDeclaredReason(err: unknown): unknown {
   const reason = raised === undefined ? undefined : DECLARED_REASON[raised];
   if (!(err instanceof McpError) || reason === undefined) return err;
   const { recovery: _frameworkHint, ...data } = isRecord(err.data) ? err.data : {};
-  return new McpError(err.code, err.message, { ...data, reason }, { cause: err });
-}
-
-/**
- * SQL with single- and double-quoted literals blanked, so a quoted name never counts
- * as a reference. One left-to-right pass in which a literal left open runs to the end
- * of the statement: no match attempt can fail and restart at a later quote, so the
- * scan is linear in the SQL's length.
- */
-export function stripStringLiterals(sql: string): string {
-  return sql.replace(
-    /'(?:[^'\\]|\\(?:[\s\S]|$)|'')*(?:'|$)|"(?:[^"\\]|\\(?:[\s\S]|$)|"")*(?:"|$)/g,
-    (literal) => (literal.startsWith("'") ? "''" : '""'),
-  );
+  const message =
+    reason === 'missing_table'
+      ? `Dataframe ${data.tableName} does not exist: it expired, was dropped to make room for newer dataframes, or was never staged.`
+      : err.message;
+  return new McpError(err.code, message, { ...data, reason }, { cause: err });
 }
 
 export class CanvasBridge {
@@ -226,8 +217,8 @@ export class CanvasBridge {
 
   /**
    * One read-only SELECT against the shared canvas, through the framework gate
-   * with system catalogs denied. A `df_` name the SQL references that is not
-   * staged fails as `missing_table` before the gate runs. `registerAs` keeps the
+   * with system catalogs denied. DuckDB resolves table references, aliases,
+   * and CTE scope; missing references map to `missing_table`. `registerAs` keeps the
    * whole result, whatever `rowLimit` says, so its size is known only once it is
    * materialized: past the staging budget on its own it is dropped and fails as
    * `register_as_too_large`; otherwise the oldest dataframes make room for it.
@@ -238,7 +229,6 @@ export class CanvasBridge {
     options: BridgeQueryOptions,
   ): Promise<{ meta?: DataframeMeta; result: QueryResult }> {
     const live = await this.sweepExpired(ctx);
-    await this.assertReferencedTablesExist(ctx, sql);
     const { registerAs } = options;
     if (registerAs && (await ctx.state.get(`${META_PREFIX}${registerAs}`)) !== null) {
       throw validationError(
@@ -300,22 +290,6 @@ export class CanvasBridge {
     await ctx.state.delete(key);
     const droppedTable = live ? await live.drop(name) : false;
     return droppedTable || hadMeta;
-  }
-
-  /**
-   * A mistyped or expired `df_<id>` would otherwise surface as the framework's
-   * generic rejection; string literals are stripped so a quoted name never counts.
-   */
-  private async assertReferencedTablesExist(ctx: Context, sql: string): Promise<void> {
-    const referenced = stripStringLiterals(sql).match(/\bdf_[A-Z0-9]{5}_[A-Z0-9]{5}\b/g) ?? [];
-    for (const name of new Set(referenced)) {
-      if ((await ctx.state.get(`${META_PREFIX}${name}`)) === null) {
-        throw notFound(
-          `Dataframe ${name} does not exist: it expired, was dropped to make room for newer dataframes, or was never staged.`,
-          { reason: 'missing_table', tableName: name },
-        );
-      }
-    }
   }
 
   /**

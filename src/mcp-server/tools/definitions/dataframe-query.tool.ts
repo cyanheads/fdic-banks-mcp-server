@@ -45,25 +45,38 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
     ).describe(
       'Materialize the full result as a new dataframe under this unused name (df_XXXXX_XXXXX: uppercase letters and digits). A name already staged fails as register_as_clash — including on a repeat of a call that already saved it. The live dataframes share a 1,000,000-row budget: the oldest are dropped to make room, and a result over the budget on its own fails as register_as_too_large. Omit to return rows only.',
     ),
-    preview: blankAsUnset(z.number().int().min(0).max(10_000).optional()).describe(
-      'Rows to return inline (0–10,000); defaults to row_limit, and a value above row_limit is treated as row_limit. Set it low when register_as keeps the full result.',
+    preview: blankAsUnset(z.number().int().min(0).optional()).describe(
+      'Rows to return inline; defaults to the effective row_limit and is clamped to it. Set it low when register_as keeps the full result.',
     ),
-    row_limit: blankAsUnset(z.number().int().min(1).max(10_000).default(1000)).describe(
-      'Hard cap on rows materialized (1–10,000). A query matching more stops here and row_count_capped comes back true; use register_as to keep the whole result.',
+    row_limit: blankAsUnset(z.number().int().min(1).max(1_000_000).default(1000)).describe(
+      'Requested materialization cap (default 1,000; hard input ceiling 1,000,000), clamped to the execution cap of 10,000. Without register_as, row_count_capped reports more matches; continue with ordered LIMIT/OFFSET pages. register_as keeps the whole result within the staging budget.',
     ),
   }),
 
   output: z.object({
+    requested_row_limit: z.number().int().describe('Requested row_limit before the execution cap.'),
+    effective_row_limit: z.number().int().describe('Effective row_limit, at most 10,000.'),
+    requested_preview: z
+      .number()
+      .int()
+      .optional()
+      .describe('Explicit preview before clamping; absent when omitted.'),
+    effective_preview: z
+      .number()
+      .int()
+      .describe('Inline row cap after clamping preview to the effective row_limit.'),
     columns: z.array(z.string().describe('Column name.')).describe('Columns in projection order.'),
     row_count: z
       .number()
       .int()
       .describe(
-        'Rows the query produced, up to row_limit; with register_as, the exact count of the new dataframe.',
+        'Rows the query produced, up to effective_row_limit; with register_as, the exact count of the new dataframe.',
       ),
     row_count_capped: z
       .boolean()
-      .describe('True when the query matched more rows than row_limit, so row_count is that cap.'),
+      .describe(
+        'True when the query matched more rows than effective_row_limit, so row_count is that cap.',
+      ),
     rows: z
       .array(z.record(z.string(), z.unknown()).describe('One result row: column → value.'))
       .describe('Result rows, bounded by preview and row_limit.'),
@@ -144,9 +157,9 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
     {
       reason: 'denied_function',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL calls a file-reading or external-data table function such as read_csv or read_parquet',
+      when: 'The SQL calls a file-reading, external-data, engine-setting, or dynamic SQL function the read-only gate refuses',
       recovery:
-        'Remove the file-reading function and query only df_ tables named in a dataset field or by fdic_dataframe_describe.',
+        'Remove the refused function and query only df_ tables named in a dataset field or by fdic_dataframe_describe.',
       // Reaching past the staged tables: a modeled rejection, but worth an operator's eye.
       severity: 'warning',
       thrownBy: 'service',
@@ -192,34 +205,46 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
     if (!bridge) {
       throw ctx.fail('canvas_unavailable', 'DataCanvas is not configured on this server.');
     }
-    // preview above row_limit would be refused by the canvas; row_limit already bounds it.
-    const preview =
-      input.preview === undefined ? undefined : Math.min(input.preview, input.row_limit);
+    const rowLimit = Math.min(input.row_limit, 10_000);
+    const preview = Math.min(input.preview ?? rowLimit, rowLimit);
+    const adjusted =
+      rowLimit !== input.row_limit || (input.preview !== undefined && preview !== input.preview);
+    const boundsNotice = adjusted
+      ? `Requested row_limit ${input.row_limit}${input.preview !== undefined ? ` and preview ${input.preview}` : ''}; effective row_limit ${rowLimit} and preview ${preview}. `
+      : '';
     const { result, meta } = await bridge.query(ctx, input.sql, {
-      rowLimit: input.row_limit,
-      ...(preview !== undefined ? { preview } : {}),
+      rowLimit,
+      preview,
       ...(input.register_as ? { registerAs: input.register_as } : {}),
     });
 
-    const previewBinds = preview !== undefined && preview < input.row_limit;
-    const cap = previewBinds ? preview : input.row_limit;
-    const lever = previewBinds ? 'raise preview' : 'raise row_limit (max 10,000)';
+    const previewBinds = preview < rowLimit;
+    const cap = preview;
+    const lever = previewBinds
+      ? `raise preview up to ${rowLimit}`
+      : rowLimit < 10_000
+        ? 'raise row_limit up to 10,000'
+        : 'read ordered LIMIT/OFFSET pages';
     if (result.rowCount === 0) {
       ctx.enrich.notice(
-        'The query returned no rows. Check the WHERE conditions and the dataframe names with fdic_dataframe_describe.',
+        `${boundsNotice}The query returned no rows. Check the WHERE conditions and the dataframe names with fdic_dataframe_describe.`,
       );
     } else if (result.truncated === true) {
       ctx.enrich.truncated({
         shown: result.rows.length,
         cap,
-        guidance: `Showing ${result.rows.length} rows. The query matched more than row_limit (${input.row_limit}), so row_count is that cap, not the full size. Use register_as to materialize the whole result with an exact row_count, or ${lever}.`,
+        guidance: `${boundsNotice}Showing ${result.rows.length} rows. More rows matched than the effective row_limit (${rowLimit}), so row_count is that cap, not the full size. Continue with a stable ORDER BY and LIMIT/OFFSET pages, use register_as to keep the result within the staging budget, or ${lever}.`,
       });
     } else if (result.rowCount > result.rows.length) {
       ctx.enrich.truncated({
         shown: result.rows.length,
         cap,
-        guidance: `Showing ${result.rows.length} of ${result.rowCount} rows; ${lever}${meta ? `, or query ${meta.tableName}` : ', or use register_as to keep the full result'}.`,
+        guidance: `${boundsNotice}Showing ${result.rows.length} of ${result.rowCount} rows; ${lever}${meta ? `, or query ${meta.tableName} with ordered LIMIT/OFFSET pages` : ', or use register_as to keep the full result within the staging budget'}.`,
       });
+    } else if (adjusted) {
+      ctx.enrich.notice(
+        `${boundsNotice}Continue with a stable ORDER BY and LIMIT/OFFSET pages, or use register_as to keep the result within the staging budget.`,
+      );
     }
 
     ctx.log.info('Dataframe query', {
@@ -229,6 +254,10 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
     });
 
     return {
+      requested_row_limit: input.row_limit,
+      effective_row_limit: rowLimit,
+      ...(input.preview !== undefined ? { requested_preview: input.preview } : {}),
+      effective_preview: preview,
       columns: result.columns,
       row_count: result.rowCount,
       row_count_capped: result.truncated === true,
@@ -250,6 +279,9 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
         ? ` (showing ${result.rows.length} of ${result.row_count})`
         : '';
     lines.push(`**${result.row_count} row(s)**${capped}${shown}`);
+    lines.push(
+      `Requested row_limit ${result.requested_row_limit}; effective row_limit ${result.effective_row_limit}. Preview: requested ${result.requested_preview ?? 'default'}, effective ${result.effective_preview}.`,
+    );
     if (result.rows.length === 0) {
       lines.push('', `Columns: ${result.columns.map(cell).join(', ') || 'none'}`);
       return [{ type: 'text', text: lines.join('\n') }];

@@ -115,6 +115,13 @@ export interface FailureBucket extends FailureTotals {
   key: string;
 }
 
+/** Grouped sums or missing-amount counts, with resolution-method counts when requested. */
+export interface FailureAggregation {
+  buckets: FailureBucket[];
+  byMethod: Map<string, number>;
+  total: number;
+}
+
 /** One metric threshold on a financial panel; at least one bound is set. */
 export interface MetricFilter {
   max?: number;

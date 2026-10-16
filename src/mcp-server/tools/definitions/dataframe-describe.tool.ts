@@ -267,7 +267,7 @@ export const dataframeDescribeTool = tool('fdic_dataframe_describe', {
         lines.push('- Parameters of the staging call (query_params):');
         for (const [key, value] of Object.entries(df.query_params)) {
           if (key === 'sql' && typeof value === 'string') {
-            lines.push('  - sql:', '', ...splitLines(value).map((line) => `> ${line}`), '');
+            lines.push('  - sql:', '', ...splitLines(value).map((line) => `>     ${line}`), '');
           } else {
             lines.push(`  - ${inline(key)}: ${inline(JSON.stringify(value) ?? 'null')}`);
           }

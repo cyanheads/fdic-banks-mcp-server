@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fdic-banks-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fdic-banks-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fdic-banks-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fdic-banks-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fdic-banks-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fdic-banks-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,9 +29,7 @@
 
 ## Overview
 
-US bank data from the [FDIC BankFind Suite API](https://api.fdic.gov/banks/docs/), which is public and needs no API key. Find any FDIC-insured bank or savings institution, including closed, merged, and failed ones, then read its quarterly Call Report financials back to 1984, rank it against peers, screen many banks at once, search failures since 1934, and map branch deposits and market share. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
-
-Institutions are keyed by their FDIC certificate number (CERT), which survives renames and charter conversions. Credit unions are insured by the NCUA and are not in this data.
+Every FDIC-insured bank and savings institution, open, merged, or failed, from the [FDIC BankFind Suite API](https://api.fdic.gov/banks/docs/). Read quarterly Call Report financials back to 1984, rank a bank against peers, screen many at once, search failures since 1934, and map branch deposits and market share. Credit unions are NCUA-insured and not included. No API key required.
 
 ### Tools
 
@@ -61,7 +59,7 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 
 ### `fdic_search_institutions` <sub>tool</sub>
 
-- Filters: `name` (up to 100 characters; every word must match a current, former, or trade name), up to 50 `certs`, `state`, `city`, `bank_classes`, `min_assets` / `max_assets` (thousands of US dollars), `holding_company_rssd`
+- Filters: `name` (up to 100 characters; every word must match a current, former, or trade name), `certs` (first 50 unique CERTs per call), `state`, `city`, `bank_classes`, `min_assets` / `max_assets` (thousands of US dollars), `holding_company_rssd`
 - `status` is `active`, `inactive`, or `any`; it defaults to `any` when `name` or `certs` is given and `active` otherwise, and the applied value comes back as `status_filter`
 - Up to 100 per page (default 20), paged with `offset` / `next_offset`; records carry `active`, `successor_cert` for merged or failed banks, `holding_company.rssd`, and `matched_on` when a former or trade name matched; requested CERTs with no record land in `missing_certs`
 
@@ -69,7 +67,7 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 
 ### `fdic_get_institution_financials` <sub>tool</sub>
 
-- `cert` required; up to 25 `metrics` (default: a 15-metric health set); `quarters` 1–200 (default 8), optionally bounded by `from_date` / `to_date` as `2025-03-31`, `20250331`, or `2025Q1`
+- `cert` required; first 25 unique `metrics` per call (default: a 15-metric health set); `quarters` accepts 1–10,000 and queries at most 200 (default 8), optionally bounded by `from_date` / `to_date` as `2025-03-31`, `20250331`, or `2025Q1`. Continue earlier history with `to_date` before the oldest returned quarter
 - Rows run most recent first, each a `values` map of metric → number, `null` when not reported; `metric_definitions` gives each metric's FDIC field, unit, and basis
 - `quarters_available` counts the quarters in the window before the cap; an unknown CERT fails as `cert_not_found`
 
@@ -78,24 +76,24 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 ### `fdic_compare_peers` <sub>tool</sub>
 
 - `cert` required; `report_date` defaults to the latest published quarter (`report_date_defaulted`); up to 20 `metrics`
-- Peer group: `peer_asset_band` (`same` by default, `any`, `under_100m`, `100m_1b`, `1b_10b`, `10b_250b`, `over_250b`) plus an optional `peer_state`, or an explicit `peer_certs` list of up to 200, which can't be combined with the band or state (`conflicting_peer_filters`)
+- Peer group: `peer_asset_band` (`same` by default, `any`, `under_100m`, `100m_1b`, `1b_10b`, `10b_250b`, `over_250b`) plus an optional `peer_state`, or `peer_certs` (first 200 unique CERTs), which can't be combined with the band or state (`conflicting_peer_filters`). Deferred peers mark `peer_cohort_incomplete`; statistics cover only processed peers
 - Each comparison returns the institution's `value`, `peer_median`, `peer_p25` / `peer_p75`, `peer_min` / `peer_max`, `percentile`, and `rank` of `rank_of`, over the `peer_count_with_value` peers that reported the metric
 
 ---
 
 ### `fdic_query_financials` <sub>tool</sub>
 
-- Filters: up to 100 `certs`, `state`, `min_assets` / `max_assets`, and up to 5 `metric_filters` (`metric` with `min` and/or `max` in the metric's unit); up to 30 `metrics`; `from_date` / `to_date`, defaulting to the latest published quarter only
-- Inline preview of up to 500 rows (default 50), ordered by `sort_by` / `sort_order`; a panel larger than the preview is staged whole as a dataframe
+- Filters: first 100 unique `certs`, `state`, `min_assets` / `max_assets`, and up to 5 `metric_filters` (`metric` with `min` and/or `max` in the metric's unit); first 30 unique `metrics`, plus every sort/filter metric; `from_date` / `to_date`, defaulting to the latest published quarter only
+- Positive inline `limit` (default 50), bounded by the fetched panel, ordered by `sort_by` / `sort_order`; a panel larger than the preview is staged whole as a dataframe
 - The panel is capped at `FDIC_PANEL_MAX_ROWS` (default 50,000) and keeps the newest quarters when it binds; `total_matching`, `rows_fetched`, and `panel_truncated` report what was left out
 
 ---
 
 ### `fdic_search_failures` <sub>tool</sub>
 
-- Filters: `name`, up to 50 `certs` (events before 1977 carry none), `state`, `from_date` / `to_date` (YYYY-MM-DD), `methods`, `min_assets`; `resolution` is `failure` by default, or `assistance` or `all`
+- Filters: `name`, `certs` (first 50 unique CERTs; events before 1977 carry none), `state`, `from_date` / `to_date` (YYYY-MM-DD), `methods`, `min_assets`; `resolution` is `failure` by default, or `assistance` or `all`
 - `summary` totals every matching event, not just the page, with a `by_method` breakdown; `group_by` (`year`, `state`, `method`, `insurance_fund`) adds `groups`
-- `estimated_loss_missing_count` counts events without an FDIC loss estimate, and a loss total is `null` when none has one; `sort` by date, loss, or assets, up to 200 per page (default 25)
+- `total_assets_missing_count`, `total_deposits_missing_count`, and `estimated_loss_missing_count` count unreported amounts over every match. A total is `null` when a nonempty set has no recorded amount; partial sums cover recorded values, and empty sets total zero. Method subtotals include assets and losses. `sort` by date, loss, or assets, up to 200 per page (default 25)
 
 ---
 
@@ -103,7 +101,7 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 
 - `cert` alone returns the institution's branches and its deposit share in each state (`mode: "institution"`); a geography (`state`, `county`, `city`, `zip`, `msa_code`) ranks every institution in that market with `hhi` (`market`); both give the institution's `position` in the market (`institution_in_market`). `county` and `city` require `state`
 - `year` from 1994 on, defaulting to the latest survey (`year_defaulted`); deposits are domestic branch deposits as of June 30, in thousands of US dollars
-- Up to 200 branches or ranked institutions inline (default 25); a larger set is staged as a dataframe, and `total_rows` gives the full count
+- Positive inline `limit` (default 25), bounded by the fetched branches or ranking; a larger set is staged as a dataframe, and `total_rows` gives the full count
 
 ---
 
@@ -125,7 +123,7 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 ### `fdic_dataframe_query` <sub>tool</sub>
 
 - One `SELECT` per call, up to 20,000 characters; writes, DDL, file-reading functions, and system catalogs are rejected with typed reasons (`non_select_statement`, `denied_function`, `system_catalog_access`, and others)
-- `row_limit` 1–10,000 (default 1,000) caps rows materialized, with `row_count_capped` when it binds; `preview` limits the rows returned inline
+- `row_limit` accepts 1–1,000,000 (default 1,000) and executes at most 10,000; `row_count_capped` reports when more rows matched. `preview` is a nonnegative inline row count clamped to the effective `row_limit`. Responses report requested and effective bounds; continue with stable `ORDER BY` and `LIMIT`/`OFFSET` pages
 - `register_as` saves the result as a new dataframe with a fresh TTL, or fails as `register_as_too_large` when the result alone passes 1,000,000 rows; `BIGINT` results such as `COUNT(*)` come back as strings
 
 ---
@@ -137,6 +135,8 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 
 ## Features
 
+Read selections accept at most 1,000 raw array items and deduplicate in request order before execution caps. Explicitly empty `certs`, `peer_certs`, `bank_classes`, and `methods` are rejected; omit them for unrestricted/default selection. Empty `metrics` retains the default health set, and empty `metric_filters` adds no predicates. `metric_filters` is an atomic conjunction: more than five predicates is rejected without querying. `processed_certs` / `deferred_certs` and `processed_metrics` / `deferred_metrics` distinguish queried items from deferred items on both output surfaces; pass deferred items in a new call. Missing-ID fields, totals, statistics, and staged query metadata cover only the processed selection. Institution/failure page `limit` accepts up to 10,000 and applies caps of 100/200, reported as `effective_limit`; continue with `next_offset`.
+
 Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 FDIC-specific:
@@ -145,12 +145,12 @@ FDIC-specific:
 - Shared request pacer: request starts capped at `FDIC_RATE_LIMIT_RPS`, at most four in flight, a cooldown that holds every caller after an FDIC 429, and an in-process response cache; each call runs under one 45-second budget (55 seconds for a panel), so an error arrives inside a typical 60-second client timeout
 - A curated catalog of 49 Call Report metrics with FDIC field code, unit, and basis; `_ytd` metrics accumulate from January 1, and unsuffixed income and return metrics cover a single quarter
 - Handles BankFind's quirks: case-sensitive code values, string-typed report dates, absence sentinels, and ratios reported as `0` when a bank did not report them
-- Peer statistics, deposit market share, and HHI are computed from every per-institution value, not from samples
+- Peer statistics cover the processed cohort; deposit market share and HHI use every institution in the selected market
 
 Agent-friendly output:
 
 - Provenance on every data response: `data_as_of` (the FDIC index build time), `metric_definitions` with unit and basis, and `report_date_defaulted` / `year_defaulted` flags when the server picked the period
-- No fabricated values: unreported metrics come back `null`, and failure loss totals report how many events lack an estimate instead of counting them as zero
+- No fabricated values: unreported metrics come back `null`, and failure totals distinguish recorded zero from missing assets, deposits, and loss estimates
 - Typed errors with recovery text that names the next call (`cert_not_found`, `conflicting_peer_filters`, `no_report_for_period`); rate-limit errors (`pacer_shed`, `upstream_rate_limited`) carry `retryAfter`
 - Staged dataframes keep their provenance and per-column units, so SQL results stay interpretable
 

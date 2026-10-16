@@ -5,10 +5,78 @@
  * @module tests/tools/markdown.test
  */
 
+import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { cell, inline, metricValue, num, splitLines } from '@/mcp-server/tools/markdown.js';
 
 describe('markdown helpers', () => {
+  it.each([
+    '<b>*x*</b>',
+    '[link](https://example.com)',
+    '&amp; &#35; &lt;b&gt;',
+    '`code` **bold** _italic_',
+    'A\\|B',
+    '## heading',
+    '~~strike~~',
+    '[x][ref]',
+    'trailing #',
+    'https://example.com/a-b?q=1 www.example.com user@example.com',
+    'and_chr a_b_c ordinary, punctuation. a/b, c.d: e-f',
+    'a+@example.com a.@example.com a-@example.com a!@example.com',
+  ])('renders %j literally in GFM table, heading and bold slots', (text) => {
+    const rendered = execFileSync(
+      'bun',
+      [
+        '-e',
+        'process.stdout.write(Bun.markdown.html(await Bun.stdin.text(), { autolinks: true }))',
+      ],
+      {
+        input: `| ${cell(text)} |\n| --- |\n| ${cell(text)} |\n\n## ${inline(text)}\n\n**${inline(text)}**`,
+        encoding: 'utf8',
+      },
+    );
+    const escapedHtml = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    expect(rendered).toContain(`<th>${escapedHtml}</th>`);
+    expect(rendered).toContain(`<td>${escapedHtml}</td>`);
+    expect(rendered).toContain(`<h2>${escapedHtml}</h2>`);
+    expect(rendered).toContain(`<strong>${escapedHtml}</strong>`);
+    expect(rendered.match(/<td>/g)).toHaveLength(1);
+  });
+  it('preserves ordinary punctuation and intraword underscores', () => {
+    const text = 'and_chr a_b_c ordinary, punctuation. a/b, c.d: e-f';
+    expect(inline(text)).toBe(text);
+    expect(cell(text)).toBe(text);
+  });
+
+  it('suppresses email autolinks with punctuation at the end of the local part', () => {
+    expect(inline('a+@example.com a.@example.com a-@example.com')).toBe(
+      'a+\\@example.com a.\\@example.com a-\\@example.com',
+    );
+  });
+
+  it.each([
+    ['unclosed emphasis', (size: number) => '*a'.repeat(size / 2)],
+    ['nested angle openers', (size: number) => '<a'.repeat(size / 2)],
+    ['overlapping autolink prefixes', (size: number) => 'www.'.repeat(size / 4)],
+    ['underscore runs', (size: number) => '_a'.repeat(size / 2)],
+    ['long digits', (size: number) => '1'.repeat(size)],
+  ] as const)('bounds thread CPU growth for %s', (shape, makeText) => {
+    const sizes = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000];
+    const samples: number[] = [];
+    for (const size of sizes) {
+      const text = makeText(size);
+      inline(text);
+      const start = process.threadCpuUsage();
+      for (let iteration = 0; iteration < 20; iteration++) inline(text);
+      const cpu = process.threadCpuUsage(start);
+      const microseconds = cpu.user + cpu.system;
+      samples.push(microseconds);
+      // Check the absolute CPU budget before attempting the next larger input.
+      expect(microseconds).toBeLessThan(1_000_000);
+    }
+    expect((samples.at(-1) ?? 0) / Math.max(samples[0] ?? 0, 1)).toBeLessThan(256);
+    console.info(JSON.stringify({ shape, sizes, threadCpuMicroseconds: samples }));
+  });
   it('flattens CR, LF, and CRLF to a space at inline slots', () => {
     expect(inline('A\r\nB\nC\rD')).toBe('A B C D');
   });

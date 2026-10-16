@@ -133,6 +133,8 @@ export function envelope(
 export interface Bucket {
   count: number;
   key: string;
+  /** `agg_term_fields=RESTYPE1` count columns, keyed by method code. */
+  methods?: Record<string, number>;
   /** Sums keyed by FDIC field (`COST`), emitted as `sum_<FIELD>`. */
   sums?: Record<string, number>;
 }
@@ -150,6 +152,10 @@ export function aggEnvelope(
   const total = options.total ?? buckets.reduce((n, b) => n + b.count, 0);
   const sumTotals: Record<string, number> = {};
   for (const bucket of buckets) {
+    for (const [method, count] of Object.entries(bucket.methods ?? {})) {
+      const key = `count_RESTYPE1_${method}`;
+      sumTotals[key] = (sumTotals[key] ?? 0) + count;
+    }
     for (const [f, v] of Object.entries(bucket.sums ?? {})) {
       sumTotals[`sum_${f}`] = (sumTotals[`sum_${f}`] ?? 0) + v;
     }
@@ -164,6 +170,12 @@ export function aggEnvelope(
       data: {
         [field]: b.key,
         count: b.count,
+        ...Object.fromEntries(
+          Object.entries(b.methods ?? {}).map(([method, count]) => [
+            `count_RESTYPE1_${method}`,
+            count,
+          ]),
+        ),
         ...Object.fromEntries(Object.entries(b.sums ?? {}).map(([f, v]) => [`sum_${f}`, v])),
       },
     })),

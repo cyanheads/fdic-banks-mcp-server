@@ -4,8 +4,7 @@
  * canvas per tenant, describe ordering and paging, SQL through the read-only
  * gate with framework rejections rethrown under fdic_dataframe_query's contract
  * reasons (its recovery filled in by the framework, asserted in the tool tests),
- * the linear string-literal scan behind the missing_table
- * pre-check, register_as provenance, drop, the staging budget's oldest-first
+ * DuckDB table resolution, register_as provenance, drop, the staging budget's oldest-first
  * eviction and register_as_too_large, the lazy TTL sweep, canvas expiry,
  * staging failure and cancellation, tenant isolation, and the listing option.
  * @module tests/services/canvas-bridge/canvas-bridge.test
@@ -21,7 +20,6 @@ import {
   getCanvasBridge,
   initCanvasBridge,
   type StageOptions,
-  stripStringLiterals,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { createDuckdbCanvas, tenantSession } from '../../helpers/canvas.js';
 import { contractRecovery } from '../../helpers/tool-results.js';
@@ -324,6 +322,19 @@ describe('canvas creation', () => {
 });
 
 describe('query', () => {
+  it('lets CTE scope shadow a staged table and resolves quoted staged identifiers', async () => {
+    const name = (await bridge.stage(session(), stageOptions()))?.name ?? '';
+    const shadow = await bridge.query(
+      queryCtx(),
+      `WITH ${name} AS (SELECT 7 AS n) SELECT * FROM ${name}`,
+      { rowLimit: 10 },
+    );
+    expect(shadow.result.rows).toEqual([{ n: 7 }]);
+    const quoted = await bridge.query(queryCtx(), `SELECT COUNT(*) AS n FROM "${name}"`, {
+      rowLimit: 10,
+    });
+    expect(quoted.result.rows).toEqual([{ n: '3' }]);
+  });
   it('runs one SELECT with rowLimit and preview passed through, returning no provenance', async () => {
     const dataset = await bridge.stage(session(), stageOptions());
     const out = await bridge.query(queryCtx(), `SELECT cert FROM ${dataset?.name} ORDER BY cert`, {
@@ -482,64 +493,6 @@ describe('query', () => {
     await expect(
       new CanvasBridge(double).query(queryCtx(), 'SELECT 1', { rowLimit: 10 }),
     ).rejects.toBe(boom);
-  });
-
-  it('scans an unterminated literal of escaped quotes in linear time, still finding the reference before it', async () => {
-    /** `'` + `\'`×30,000 + `\`: a backtracking scan retries every quote, costing over a second. */
-    const sql = `SELECT * FROM df_ZZZZZ_ZZZZZ WHERE note = '${"\\'".repeat(30_000)}\\`;
-    const started = performance.now();
-    const error = await rejection(bridge.query(queryCtx(), sql, { rowLimit: 10 }));
-    const elapsedMs = performance.now() - started;
-    expect(error.data).toMatchObject({ reason: 'missing_table', tableName: 'df_ZZZZZ_ZZZZZ' });
-    expect(elapsedMs).toBeLessThan(100);
-  });
-});
-
-describe('stripStringLiterals', () => {
-  /** The two-pass scan it replaced, the oracle for SQL whose literals each hold one quote kind. */
-  const twoPass = (sql: string) =>
-    sql.replace(/'([^'\\]|\\.|'')*'/g, "''").replace(/"([^"\\]|\\.|"")*"/g, '""');
-
-  it.each([
-    'SELECT * FROM df_AB12C_3DE45',
-    "SELECT name FROM df_AB12C_3DE45 WHERE state = 'WA' AND city = 'Walla Walla'",
-    "SELECT 'df_ZZZZZ_ZZZZZ' AS label, COUNT(*) AS n FROM df_AB12C_3DE45",
-    "SELECT * FROM df_AB12C_3DE45 WHERE name = 'O''Brien Savings' OR name = ''",
-    "SELECT * FROM df_AB12C_3DE45 WHERE note = 'back\\'slash' AND x = 'y'",
-    'SELECT "roa" AS "Return ""on"" assets" FROM df_AB12C_3DE45 a JOIN df_ZZZZZ_ZZZZZ b USING (cert)',
-    'WITH t AS (SELECT cert FROM df_AB12C_3DE45)\nSELECT * FROM t\n-- \'a comment\'\nWHERE "cert" > 0',
-  ])('blanks the literals of %j exactly as the two-pass scan did', (sql) => {
-    expect(stripStringLiterals(sql)).toBe(twoPass(sql));
-  });
-
-  it('reads literals left to right, so a quote of the other kind inside one opens nothing', () => {
-    expect(
-      stripStringLiterals(`SELECT "it's" AS label FROM df_ZZZZZ_ZZZZZ WHERE state = 'WA'`),
-    ).toBe(`SELECT "" AS label FROM df_ZZZZZ_ZZZZZ WHERE state = ''`);
-  });
-
-  it('blanks an unterminated literal through the end of the statement', () => {
-    expect(stripStringLiterals("SELECT * FROM df_ZZZZZ_ZZZZZ WHERE x = 'open \\")).toBe(
-      "SELECT * FROM df_ZZZZZ_ZZZZZ WHERE x = ''",
-    );
-  });
-
-  it.each([
-    ['a trailing lone backslash in a single-quoted literal', "SELECT 'a\\", "SELECT ''"],
-    ['a trailing lone backslash in a double-quoted literal', 'SELECT "a\\', 'SELECT ""'],
-    ['an escaped backslash before the closing quote', "SELECT 'a\\\\' FROM t", "SELECT '' FROM t"],
-    ['an escaped single quote', "SELECT 'it\\'s' FROM t", "SELECT '' FROM t"],
-    ['an escaped double quote', 'SELECT "say \\"hi\\"" FROM t', 'SELECT "" FROM t'],
-    ['a doubled single quote', "SELECT 'O''Brien', 'x' FROM t", "SELECT '', '' FROM t"],
-    ['a doubled double quote', 'SELECT "a""b" FROM t', 'SELECT "" FROM t'],
-    [
-      'an unterminated single-quoted literal',
-      "SELECT * FROM t WHERE x = 'open",
-      "SELECT * FROM t WHERE x = ''",
-    ],
-    ['an unterminated double-quoted literal', 'SELECT "open FROM t', 'SELECT ""'],
-  ])('blanks %s', (_label, sql, expected) => {
-    expect(stripStringLiterals(sql)).toBe(expected);
   });
 });
 

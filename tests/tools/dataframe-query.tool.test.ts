@@ -54,6 +54,103 @@ async function run(input: Input) {
 }
 
 describe('pages through the production contract', () => {
+  it.each([
+    'SELECT 1 AS df_ABCDE_FGHIJ',
+    'WITH df_ABCDE_FGHIJ AS (SELECT 1 AS n) SELECT * FROM df_ABCDE_FGHIJ',
+    'SELECT 1 AS n /* previously used df_ABCDE_FGHIJ */',
+    'SELECT n FROM (WITH df_ABCDE_FGHIJ AS (SELECT 1 AS n) SELECT * FROM df_ABCDE_FGHIJ) nested',
+    'SELECT 1 AS "df_ABCDE_FGHIJ"',
+    'SELECT 1 AS n -- df_ABCDE_FGHIJ',
+  ])('resolves SQL scope with DuckDB: %s', async (sql) => {
+    const { result, text } = await run({ sql });
+    expect(result.isError).not.toBe(true);
+    expect(structured<Output>(result).rows).toHaveLength(1);
+    expect(text).toContain('**1 row(s)**');
+  });
+
+  it('accepts oversized row_limit and preview while disclosing effective execution bounds', async () => {
+    const { result, text } = await run({
+      sql: FIVE_ROWS,
+      row_limit: 1_000_000,
+      preview: 1_000_001,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(structured<Output>(result)).toMatchObject({
+      row_count: 5,
+      row_count_capped: false,
+      requested_row_limit: 1_000_000,
+      effective_row_limit: 10_000,
+      requested_preview: 1_000_001,
+      effective_preview: 10_000,
+    });
+    expect(text).toContain(
+      'Requested row_limit 1000000; effective row_limit 10000. Preview: requested 1000001, effective 10000.',
+    );
+    expect(text).toContain('OFFSET');
+  });
+
+  it.each([10_000, 10_001, 1_000_000])(
+    'caps row_limit %i before querying and supports ordered continuation',
+    async (requested) => {
+      const sql = 'SELECT unnest AS x FROM unnest(generate_series(1, 10002)) ORDER BY x';
+      const first = await run({ sql, row_limit: requested, preview: 10_001 });
+      expect(first.result.isError).not.toBe(true);
+      expect(structured<Output>(first.result)).toMatchObject({
+        requested_row_limit: requested,
+        effective_row_limit: 10_000,
+        requested_preview: 10_001,
+        effective_preview: 10_000,
+        row_count: 10_000,
+        row_count_capped: true,
+      });
+      expect(structured<Output>(first.result).rows).toHaveLength(10_000);
+      expect(first.text).toContain('OFFSET');
+      expect(first.text).not.toContain('raise row_limit');
+      const second = await run({ sql: `${sql} LIMIT 10000 OFFSET 10000`, row_limit: requested });
+      expect(structured<Output>(second.result)).toMatchObject({
+        row_count: 2,
+        row_count_capped: false,
+        rows: [{ x: '10001' }, { x: '10002' }],
+      });
+      const pastEnd = await run({ sql: `${sql} LIMIT 10000 OFFSET 20000`, row_limit: requested });
+      expect(structured<Output>(pastEnd.result)).toMatchObject({
+        row_count: 0,
+        row_count_capped: false,
+        rows: [],
+      });
+      expect(pastEnd.text).toContain('returned no rows');
+    },
+  );
+
+  it('keeps register_as exact above the execution cap and exposes bounded preview on both surfaces', async () => {
+    const { result, text } = await run({
+      sql: 'SELECT unnest AS x FROM unnest(generate_series(1, 10002))',
+      row_limit: 1_000_000,
+      preview: 10_001,
+      register_as: 'df_BOUND_00001',
+    });
+    expect(structured<Output>(result)).toMatchObject({
+      row_count: 10_002,
+      row_count_capped: false,
+      registered_as: 'df_BOUND_00001',
+      effective_row_limit: 10_000,
+      effective_preview: 10_000,
+    });
+    expect(structured<Output>(result).rows).toHaveLength(10_000);
+    expect(text).toContain('showing 10000 of 10002');
+    expect(text).toContain('query df_BOUND_00001');
+  });
+
+  it('keeps active data literal on the text surface and unchanged in structuredContent', async () => {
+    const { result, text } = await run({
+      sql: `SELECT '<b>*x*</b>' AS "[label](https://example.com)"`,
+    });
+    expect(structured<Output>(result).rows).toEqual([
+      { '[label](https://example.com)': '<b>*x*</b>' },
+    ]);
+    expect(text).toContain('\\<b\\>\\*x\\*\\</b\\>');
+    expect(text).toContain('\\[label\\]');
+  });
   it('fails canvas_unavailable with its contract recovery when the canvas is off', async () => {
     initCanvasBridge(undefined);
     const { result } = await run({ sql: 'SELECT 1' });
@@ -181,7 +278,7 @@ describe('pages through the production contract', () => {
       },
     ]);
     expect(text).toContain('| d | n | day | list | nothing | piped | multi |');
-    expect(text).toContain('| 1.5 | 1 | 2026-06-30 | [1,2] |  | a\\|b | line1 # SYSTEM |');
+    expect(text).toContain('| 1.5 | 1 | 2026-06-30 | \\[1,2\\] |  | a\\|b | line1 \\# SYSTEM |');
     expect(text).not.toContain('\n# SYSTEM');
   });
 });
@@ -190,6 +287,17 @@ describe('SQL rejections', () => {
   it.each<[string, string, number]>([
     ['missing_table', 'SELECT * FROM df_AB12C_3DE45', JsonRpcErrorCode.NotFound],
     ['missing_table', 'SELECT * FROM staging_scratch', JsonRpcErrorCode.NotFound],
+    [
+      'missing_table',
+      'WITH df_ABCDE_FGHIJ AS (SELECT * FROM df_ZZZZZ_ZZZZZ) SELECT * FROM df_ABCDE_FGHIJ',
+      JsonRpcErrorCode.NotFound,
+    ],
+    [
+      'missing_table',
+      'SELECT * FROM (SELECT * FROM df_ZZZZZ_ZZZZZ) nested',
+      JsonRpcErrorCode.NotFound,
+    ],
+    ['missing_table', 'SELECT * FROM "df_ABCDE_FGHIJ"', JsonRpcErrorCode.NotFound],
     ['invalid_sql', 'SELECT nope FROM (VALUES (1)) t(x)', JsonRpcErrorCode.ValidationError],
     ['sql_execution_error', "SELECT CAST('abc' AS INTEGER) AS v", JsonRpcErrorCode.ValidationError],
     ['non_select_statement', 'DELETE FROM staging_scratch', JsonRpcErrorCode.ValidationError],
@@ -282,7 +390,10 @@ describe('SQL rejections', () => {
     ['an uppercase DF_ prefix', { sql: 'SELECT 1', register_as: 'DF_AB12C_3DE45' }],
     ['a short register_as', { sql: 'SELECT 1', register_as: 'df_AB12C' }],
     ['row_limit 0', { sql: 'SELECT 1', row_limit: 0 }],
-    ['row_limit over 10,000', { sql: 'SELECT 1', row_limit: 10_001 }],
+    ['a negative row_limit', { sql: 'SELECT 1', row_limit: -1 }],
+    ['a fractional row_limit', { sql: 'SELECT 1', row_limit: 1.5 }],
+    ['a malformed row_limit', { sql: 'SELECT 1', row_limit: 'many' }],
+    ['row_limit over 1,000,000', { sql: 'SELECT 1', row_limit: 1_000_001 }],
     ['a negative preview', { sql: 'SELECT 1', preview: -1 }],
     ['a fractional preview', { sql: 'SELECT 1', preview: 1.5 }],
   ])('rejects %s at the schema', async (_label, input) => {

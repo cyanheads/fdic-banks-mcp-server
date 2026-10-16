@@ -13,9 +13,23 @@ import type { MetricUnit } from '@/services/fdic/metric-catalog.js';
  */
 const LINE_BREAK = /\r\n|[\n\v\f\r\u0085\u{2028}\u{2029}]/gu;
 
-/** Upstream text at an inline slot (heading, bold label, list item): line breaks flattened to a space. */
+/** Upstream text rendered literally in inline, heading, bold-label, and table slots. */
 export function inline(text: string): string {
-  return text.replace(LINE_BREAK, ' ');
+  return text
+    .replace(LINE_BREAK, ' ')
+    .replace(
+      /[\\`*_[\]<>&#|~@]|(?<=[a-z]):(?=\/\/)|(?<=www)\./gi,
+      (character: string, index: number, whole: string) => {
+        // GFM leaves underscores between letters or digits inert.
+        if (
+          character === '_' &&
+          /[\p{L}\p{N}]/u.test(whole[index - 1] ?? '') &&
+          /[\p{L}\p{N}]/u.test(whole[index + 1] ?? '')
+        )
+          return character;
+        return `\\${character}`;
+      },
+    );
 }
 
 /** Multi-line text split at every line break, for a renderer that prefixes each line. */
@@ -24,11 +38,10 @@ export function splitLines(text: string): string[] {
 }
 
 /**
- * Upstream text in a table cell: flattened, with backslashes and pipes escaped, so a
- * `\|` in the text cannot leave a live pipe that splits the cell.
+ * Reuse inline escaping once: a second backslash pass would reactivate table pipes.
  */
 export function cell(text: string): string {
-  return inline(text).replace(/[\\|]/g, '\\$&');
+  return inline(text);
 }
 
 /** A number with thousands separators and at most `maxFraction` decimals; `—` when absent. */

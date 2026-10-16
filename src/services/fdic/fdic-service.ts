@@ -54,6 +54,7 @@ import {
 import type {
   BranchRecord,
   CallBudget,
+  FailureAggregation,
   FailureBucket,
   FailureFilters,
   FailureGroupBy,
@@ -1096,25 +1097,27 @@ export class FdicService {
   }
 
   /**
-   * Per-bucket counts and sums over matching events. With `missingCostOnly`, only
-   * events FDIC holds no loss estimate for — FDIC's `COST` sums skip them silently.
+   * Per-bucket sums or missing-amount counts over every match. Missing queries
+   * also count resolution methods so one request supplies all completeness scopes.
    */
   async aggregateFailures(
     filters: FailureFilters,
     groupBy: FailureGroupBy,
-    options: { missingCostOnly: boolean },
+    options: { missingField?: 'COST' | 'QBFASSET' | 'QBFDEP' },
     ctx: Context,
     budget: CallBudget,
-  ): Promise<{ buckets: FailureBucket[]; total: number }> {
+  ): Promise<FailureAggregation> {
     const field = FAILURE_GROUP_FIELD[groupBy];
+    const { missingField } = options;
     const envelope = await this.query(
       'failures',
       {
-        filters: options.missingCostOnly
-          ? and(failureClause(filters), notExists('COST'))
+        filters: missingField
+          ? and(failureClause(filters), notExists(missingField))
           : failureClause(filters),
         agg_by: field,
-        agg_sum_fields: options.missingCostOnly ? undefined : 'COST,QBFASSET,QBFDEP',
+        agg_sum_fields: missingField ? undefined : 'COST,QBFASSET,QBFDEP',
+        agg_term_fields: missingField && groupBy !== 'method' ? 'RESTYPE1' : undefined,
         agg_limit: MAX_PAGE,
         limit: 0,
       },
@@ -1123,6 +1126,16 @@ export class FdicService {
     );
     return {
       total: envelope.total,
+      byMethod:
+        groupBy === 'method'
+          ? new Map(
+              envelope.rows.map((row) => [str(row.data.RESTYPE1) ?? '', num(row.data.count) ?? 0]),
+            )
+          : new Map(
+              Object.entries(envelope.totals)
+                .filter(([key]) => key.startsWith('count_RESTYPE1_'))
+                .map(([key, value]) => [key.slice('count_RESTYPE1_'.length), num(value) ?? 0]),
+            ),
       buckets: envelope.rows.map((row) => ({
         key: str(row.data[field]) ?? '',
         ...totalsOf(row.data, 'sum_'),

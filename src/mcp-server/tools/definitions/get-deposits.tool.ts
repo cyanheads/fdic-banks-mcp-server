@@ -100,8 +100,8 @@ export const getDepositsTool = tool('fdic_get_deposits', {
     year: blankAsUnset(z.number().int().min(1994).optional()).describe(
       'Survey year (deposits as of June 30), 1994 on. Omit for the latest survey.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(200).default(25)).describe(
-      'Branches or ranked institutions returned inline (1–200). A larger set is also staged whole as a dataframe when this deployment stages dataframes.',
+    limit: blankAsUnset(z.number().int().min(1).default(25)).describe(
+      'Positive inline preview count, bounded by the already-fetched branches or ranking. A larger set is staged whole as a dataframe when this deployment stages dataframes.',
     ),
   }),
 
@@ -616,7 +616,7 @@ export const getDepositsTool = tool('fdic_get_deposits', {
         guidance: `Showing ${shown} of ${totalRows} ${what}. ${
           dataset
             ? stagedNotice(dataset)
-            : 'Raise limit (max 200) or narrow the geography to see the rest inline.'
+            : 'Raise limit or narrow the geography to see the rest inline.'
         }`,
       });
     }

@@ -11,17 +11,18 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { FAILURE_METHOD_CODES, failureMethodLabel } from '@/services/fdic/failure-methods.js';
 import { callBudget, getFdicService } from '@/services/fdic/fdic-service.js';
 import { isCalendarDate, nameTokens as tokenize } from '@/services/fdic/query-builder.js';
-import type { FailureBucket, FailureFilters } from '@/services/fdic/types.js';
+import type { FailureAggregation, FailureBucket, FailureFilters } from '@/services/fdic/types.js';
 import { normalizeState } from '@/services/fdic/us-states.js';
 import { blankAsUnset, calendarDateInput, stateInput } from '../input-schemas.js';
 import { cell, inline, num } from '../markdown.js';
+import { certSelectionFields, certSelectionTrailer, partitionSelection } from '../read-bounds.js';
 
 const RESOLUTIONS = ['failure', 'assistance', 'all'] as const;
 const GROUP_BY = ['year', 'state', 'method', 'insurance_fund'] as const;
 const SORTS = ['date_desc', 'date_asc', 'loss_desc', 'assets_desc'] as const;
 
-/** `null` when every event in a non-empty set lacks an estimate: FDIC sums those to 0. */
-function lossTotal(count: number, sum: number, missing: number): number | null {
+/** `null` when every event in a nonempty set lacks the amount; preserve real and empty-set zero. */
+function recordedTotal(count: number, sum: number, missing: number): number | null {
   return count > 0 && missing === count ? null : sum;
 }
 
@@ -30,13 +31,22 @@ function loss(value: number | null): string {
   return value === null ? 'no estimate' : num(value);
 }
 
+function amount(value: number | null): string {
+  return value === null ? 'not reported' : num(value);
+}
+
 const TotalsFields = {
   count: z.number().int().describe('Matching events.'),
   total_assets: z
     .number()
+    .nullable()
     .describe(
-      'Sum of total assets at the last report before failure, USD thousands; events with no recorded figure add nothing.',
+      'Sum of recorded assets, USD thousands; null when a nonempty set has no recorded amounts.',
     ),
+  total_assets_missing_count: z
+    .number()
+    .int()
+    .describe('Events without assets; the sum covers only recorded values.'),
   estimated_loss_total: z
     .number()
     .nullable()
@@ -47,6 +57,19 @@ const TotalsFields = {
     .number()
     .int()
     .describe('Events without an FDIC loss estimate — estimated_loss_total covers only the rest.'),
+};
+
+const DepositTotalsFields = {
+  total_deposits: z
+    .number()
+    .nullable()
+    .describe(
+      'Sum of recorded deposits, USD thousands; null when a nonempty set has no recorded amounts.',
+    ),
+  total_deposits_missing_count: z
+    .number()
+    .int()
+    .describe('Events without deposits; the sum covers only recorded values.'),
 };
 
 export const searchFailuresTool = tool('fdic_search_failures', {
@@ -61,9 +84,12 @@ export const searchFailuresTool = tool('fdic_search_failures', {
     ),
     certs: z
       .array(z.number().int().min(1).describe('FDIC certificate number.'))
-      .max(50)
+      .min(1, 'Provide at least one CERT, or omit certs for an unrestricted search.')
+      .max(1000)
       .optional()
-      .describe('Up to 50 CERTs of failed institutions. Events before 1977 carry no CERT.'),
+      .describe(
+        'Nonempty selection of at most 1000 raw CERTs; deduplicated before querying the first 50. deferred_certs holds the rest for another call. Events before 1977 carry no CERT.',
+      ),
     state: stateInput(
       "Failed institution's headquarters state: two-letter code in any case or full name.",
     ),
@@ -80,7 +106,8 @@ export const searchFailuresTool = tool('fdic_search_failures', {
             'Resolution method code, uppercase; fdic_list_reference topic failure_methods lists them.',
           ),
       )
-      .max(FAILURE_METHOD_CODES.length)
+      .min(1, 'Provide at least one method, or omit methods for all methods.')
+      .max(1000)
       .optional()
       .describe(
         'How each event was resolved: PA purchase and assumption of all deposits, PI P&A of insured deposits only, P&A P&A with deposit scope undetermined, IDT insured deposit transfer, ABT asset-backed transfer, PO payout, DINB payout through a Deposit Insurance National Bank, A/A assistance transaction, REP reprivatization, MGR FSLIC management takeover, OBAM undocumented assistance code.',
@@ -94,8 +121,8 @@ export const searchFailuresTool = tool('fdic_search_failures', {
     sort: blankAsUnset(z.enum(SORTS).default('date_desc')).describe(
       'date_desc (newest first, default), date_asc, loss_desc (largest estimated loss first), or assets_desc.',
     ),
-    limit: blankAsUnset(z.number().int().min(1).max(200).default(25)).describe(
-      'Events per page (1–200).',
+    limit: blankAsUnset(z.number().int().min(1).max(10_000).default(25)).describe(
+      'Events per page; accepts 1–10000, executes at most 200. effective_limit reports the applied count; use next_offset to continue.',
     ),
     offset: blankAsUnset(z.number().int().min(0).max(100_000).default(0)).describe(
       'Events to skip (0–100,000); pass next_offset from the previous page.',
@@ -181,7 +208,7 @@ export const searchFailuresTool = tool('fdic_search_failures', {
     summary: z
       .object({
         ...TotalsFields,
-        total_deposits: z.number().describe('Sum of total deposits, USD thousands.'),
+        ...DepositTotalsFields,
         by_method: z
           .array(
             z
@@ -201,7 +228,7 @@ export const searchFailuresTool = tool('fdic_search_failures', {
           .object({
             key: z.string().describe('Year, state code, method code, or fund.'),
             ...TotalsFields,
-            total_deposits: z.number().describe('Sum of total deposits, USD thousands.'),
+            ...DepositTotalsFields,
           })
           .describe('Totals for one group.'),
       )
@@ -220,6 +247,8 @@ export const searchFailuresTool = tool('fdic_search_failures', {
   }),
 
   enrichment: {
+    ...certSelectionFields,
+    effective_limit: z.number().int().optional().describe('Page size applied, at most 200.'),
     notice: z
       .string()
       .optional()
@@ -229,6 +258,7 @@ export const searchFailuresTool = tool('fdic_search_failures', {
     cap: z.number().optional().describe('The limit applied to this page.'),
   },
 
+  enrichmentTrailer: certSelectionTrailer,
   errors: [
     {
       reason: 'invalid_state',
@@ -303,14 +333,28 @@ export const searchFailuresTool = tool('fdic_search_failures', {
     // Defaulted here, not in the schema, so the zero-hit notice can tell an
     // explicit resolution failure from the default.
     const resolution = input.resolution ?? 'failure';
+    const selected = input.certs === undefined ? undefined : partitionSelection(input.certs, 50);
+    const limit = Math.min(input.limit, 200);
+    ctx.enrich({
+      effective_limit: limit,
+      ...(selected
+        ? { processed_certs: selected.processed, deferred_certs: selected.deferred }
+        : {}),
+      ...(selected?.deferred.length
+        ? {
+            selection_notice:
+              'Totals and groups cover only processed_certs. Pass deferred_certs as certs in a new call.',
+          }
+        : {}),
+    });
     const filters: FailureFilters = {
       resolution,
       ...(nameTokens ? { nameTokens } : {}),
-      ...(input.certs?.length ? { certs: [...new Set(input.certs)] } : {}),
+      ...(selected ? { certs: selected.processed } : {}),
       ...(state ? { state } : {}),
       ...(input.from_date ? { from: input.from_date } : {}),
       ...(input.to_date ? { to: input.to_date } : {}),
-      ...(input.methods?.length ? { methods: input.methods } : {}),
+      ...(input.methods ? { methods: [...new Set(input.methods)] } : {}),
       // A minimum of 0 bounds nothing; as a range clause it would also drop events with no recorded assets.
       ...(input.min_assets ? { minAssets: input.min_assets } : {}),
     };
@@ -318,29 +362,43 @@ export const searchFailuresTool = tool('fdic_search_failures', {
 
     const service = getFdicService();
     const budget = callBudget();
-    const [page, missingByMethod, grouped, groupedMissing] = await Promise.all([
+    const completenessGroup = groupBy ?? 'method';
+    const [page, missingCost, missingAssets, missingDeposits, grouped] = await Promise.all([
       service.searchFailures(
         filters,
-        { sort: input.sort, limit: input.limit, offset: input.offset },
+        { sort: input.sort, limit, offset: input.offset },
         ctx,
         budget,
       ),
-      service.aggregateFailures(filters, 'method', { missingCostOnly: true }, ctx, budget),
-      groupBy
-        ? service.aggregateFailures(filters, groupBy, { missingCostOnly: false }, ctx, budget)
-        : undefined,
+      service.aggregateFailures(filters, completenessGroup, { missingField: 'COST' }, ctx, budget),
+      service.aggregateFailures(
+        filters,
+        completenessGroup,
+        { missingField: 'QBFASSET' },
+        ctx,
+        budget,
+      ),
+      service.aggregateFailures(
+        filters,
+        completenessGroup,
+        { missingField: 'QBFDEP' },
+        ctx,
+        budget,
+      ),
       groupBy && groupBy !== 'method'
-        ? service.aggregateFailures(filters, groupBy, { missingCostOnly: true }, ctx, budget)
+        ? service.aggregateFailures(filters, groupBy, {}, ctx, budget)
         : undefined,
     ]);
 
-    const missingForMethod = new Map(missingByMethod.buckets.map((b) => [b.key, b.count]));
+    const missingForMethod = missingCost.byMethod;
     const summary = {
       count: page.totals.count,
-      total_assets: page.totals.assets,
-      total_deposits: page.totals.deposits,
-      estimated_loss_total: lossTotal(page.totals.count, page.totals.cost, missingByMethod.total),
-      estimated_loss_missing_count: missingByMethod.total,
+      total_assets: recordedTotal(page.totals.count, page.totals.assets, missingAssets.total),
+      total_assets_missing_count: missingAssets.total,
+      total_deposits: recordedTotal(page.totals.count, page.totals.deposits, missingDeposits.total),
+      total_deposits_missing_count: missingDeposits.total,
+      estimated_loss_total: recordedTotal(page.totals.count, page.totals.cost, missingCost.total),
+      estimated_loss_missing_count: missingCost.total,
       by_method: page.byMethod
         .toSorted((a, b) => b.count - a.count)
         .map((b) => {
@@ -349,23 +407,22 @@ export const searchFailuresTool = tool('fdic_search_failures', {
             method: b.key,
             method_label: failureMethodLabel(b.key),
             count: b.count,
-            total_assets: b.assets,
-            estimated_loss_total: lossTotal(b.count, b.cost, missing),
+            total_assets: recordedTotal(b.count, b.assets, missingAssets.byMethod.get(b.key) ?? 0),
+            total_assets_missing_count: missingAssets.byMethod.get(b.key) ?? 0,
+            estimated_loss_total: recordedTotal(b.count, b.cost, missing),
             estimated_loss_missing_count: missing,
           };
         }),
     };
 
     let groups: ReturnType<typeof toGroup>[] | undefined;
-    if (grouped && groupBy) {
-      const missingForGroup = groupedMissing
-        ? new Map(groupedMissing.buckets.map((b) => [b.key, b.count]))
-        : missingForMethod;
+    if (groupBy) {
+      const aggregate = groupBy === 'method' ? page.byMethod : (grouped?.buckets ?? []);
       const buckets =
         groupBy === 'year'
-          ? fillYears(grouped.buckets)
-          : grouped.buckets.toSorted((a, b) => b.count - a.count || a.key.localeCompare(b.key));
-      groups = buckets.map((b) => toGroup(b, missingForGroup.get(b.key) ?? 0));
+          ? fillYears(aggregate)
+          : aggregate.toSorted((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+      groups = buckets.map((b) => toGroup(b, missingCost, missingAssets, missingDeposits));
     }
 
     const end = input.offset + page.rows.length;
@@ -413,7 +470,7 @@ export const searchFailuresTool = tool('fdic_search_failures', {
     } else if (hasMore) {
       ctx.enrich.truncated({
         shown: page.rows.length,
-        cap: input.limit,
+        cap: limit,
         guidance: `Showing events ${input.offset + 1}–${end} of ${page.total}; pass offset ${end} for the next page. summary covers every matching event.`,
       });
     }
@@ -436,19 +493,19 @@ export const searchFailuresTool = tool('fdic_search_failures', {
     const lines = [
       `## ${num(s.count)} ${result.resolution_filter === 'all' ? 'failure and assistance' : result.resolution_filter} events`,
       `Data as of ${result.data_as_of}. Dollar amounts are thousands of US dollars. Total matching: ${num(result.total)}.`,
-      `**Summary:** total assets ${num(s.total_assets)} · total deposits ${num(s.total_deposits)} · estimated loss ${loss(s.estimated_loss_total)} (${num(s.estimated_loss_missing_count)} events without an estimate, not counted)`,
+      `**Summary:** total assets ${amount(s.total_assets)} (${num(s.total_assets_missing_count)} events without assets) · total deposits ${amount(s.total_deposits)} (${num(s.total_deposits_missing_count)} events without deposits) · estimated loss ${loss(s.estimated_loss_total)} (${num(s.estimated_loss_missing_count)} events without an estimate, not counted)`,
     ];
     if (result.next_offset !== undefined) lines.push(`Next page: offset ${result.next_offset}.`);
 
     if (s.by_method.length) {
       lines.push(
         '',
-        '| Method | Label | Events | Total assets | Estimated loss | Without estimate |',
+        '| Method | Label | Events | Total assets | Without assets | Estimated loss | Without estimate |',
       );
-      lines.push('|:--|:--|--:|--:|--:|--:|');
+      lines.push('|:--|:--|--:|--:|--:|--:|--:|');
       for (const m of s.by_method) {
         lines.push(
-          `| ${cell(m.method)} | ${cell(m.method_label)} | ${num(m.count)} | ${num(m.total_assets)} | ${loss(m.estimated_loss_total)} | ${num(m.estimated_loss_missing_count)} |`,
+          `| ${cell(m.method)} | ${cell(m.method_label)} | ${num(m.count)} | ${amount(m.total_assets)} | ${num(m.total_assets_missing_count)} | ${loss(m.estimated_loss_total)} | ${num(m.estimated_loss_missing_count)} |`,
         );
       }
     }
@@ -456,12 +513,12 @@ export const searchFailuresTool = tool('fdic_search_failures', {
     if (result.groups) {
       lines.push(
         '',
-        '| Group | Events | Total assets | Total deposits | Estimated loss | Without estimate |',
+        '| Group | Events | Total assets | Without assets | Total deposits | Without deposits | Estimated loss | Without estimate |',
       );
-      lines.push('|:--|--:|--:|--:|--:|--:|');
+      lines.push('|:--|--:|--:|--:|--:|--:|--:|--:|');
       for (const g of result.groups) {
         lines.push(
-          `| ${cell(g.key)} | ${num(g.count)} | ${num(g.total_assets)} | ${num(g.total_deposits)} | ${loss(g.estimated_loss_total)} | ${num(g.estimated_loss_missing_count)} |`,
+          `| ${cell(g.key)} | ${num(g.count)} | ${amount(g.total_assets)} | ${num(g.total_assets_missing_count)} | ${amount(g.total_deposits)} | ${num(g.total_deposits_missing_count)} | ${loss(g.estimated_loss_total)} | ${num(g.estimated_loss_missing_count)} |`,
         );
       }
     }
@@ -499,13 +556,23 @@ export const searchFailuresTool = tool('fdic_search_failures', {
   },
 });
 
-function toGroup(b: FailureBucket, missing: number) {
+function toGroup(
+  b: FailureBucket,
+  cost: FailureAggregation,
+  assets: FailureAggregation,
+  deposits: FailureAggregation,
+) {
+  const missing = cost.buckets.find((bucket) => bucket.key === b.key)?.count ?? 0;
+  const missingAssets = assets.buckets.find((bucket) => bucket.key === b.key)?.count ?? 0;
+  const missingDeposits = deposits.buckets.find((bucket) => bucket.key === b.key)?.count ?? 0;
   return {
     key: b.key,
     count: b.count,
-    total_assets: b.assets,
-    total_deposits: b.deposits,
-    estimated_loss_total: lossTotal(b.count, b.cost, missing),
+    total_assets: recordedTotal(b.count, b.assets, missingAssets),
+    total_assets_missing_count: missingAssets,
+    total_deposits: recordedTotal(b.count, b.deposits, missingDeposits),
+    total_deposits_missing_count: missingDeposits,
+    estimated_loss_total: recordedTotal(b.count, b.cost, missing),
     estimated_loss_missing_count: missing,
   };
 }

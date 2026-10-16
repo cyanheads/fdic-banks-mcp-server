@@ -20,6 +20,13 @@ import { reportDateToIso } from '@/services/fdic/query-builder.js';
 import { normalizeState } from '@/services/fdic/us-states.js';
 import { blankAsUnset, metricEnum, reportDateInput, stateInput } from '../input-schemas.js';
 import { cell, inline, metricValue, num } from '../markdown.js';
+import {
+  certSelectionFields,
+  certSelectionTrailer,
+  metricSelectionFields,
+  metricSelectionTrailer,
+  partitionSelection,
+} from '../read-bounds.js';
 
 const BAND_INPUTS = ['same', 'any', ...ASSET_BAND_CODES] as const;
 const RESOLVED_BANDS = ['any', ...ASSET_BAND_CODES] as const;
@@ -45,10 +52,10 @@ export const comparePeersTool = tool('fdic_compare_peers', {
     ),
     metrics: z
       .array(metricEnum)
-      .max(20)
+      .max(1000)
       .optional()
       .describe(
-        'Up to 20 metric names (fdic_list_reference topic metrics). Omit for the default health set.',
+        'At most 1000 raw metric names. Deduplicated before querying the first 20; deferred_metrics holds the rest. Omit or pass [] for the default health set.',
       ),
     peer_asset_band: blankAsUnset(z.enum(BAND_INPUTS).optional()).describe(
       "Peer size band by total assets: same (the band holding the institution's own assets, default), any (all sizes), under_100m, 100m_1b, 1b_10b, 10b_250b, or over_250b; fdic_list_reference topic peer_asset_bands gives each band's bounds. Not combinable with peer_certs.",
@@ -58,10 +65,11 @@ export const comparePeersTool = tool('fdic_compare_peers', {
     ),
     peer_certs: z
       .array(z.number().int().min(1).describe('FDIC certificate number of one peer.'))
-      .max(200)
+      .min(1, 'Provide at least one peer CERT, or omit peer_certs for the default group.')
+      .max(1000)
       .optional()
       .describe(
-        'An explicit peer list of up to 200 CERTs, in place of the band and state peer group — pass it without peer_asset_band and peer_state. Fewer than five peers still computes, with a notice.',
+        'Nonempty peer selection, at most 1000 raw CERTs, replacing band/state filters. Deduplicated before querying the first 200; deferred_certs holds the rest and marks the cohort incomplete. Fewer than five peers still computes, with a notice.',
       ),
   }),
 
@@ -173,6 +181,14 @@ export const comparePeersTool = tool('fdic_compare_peers', {
   }),
 
   enrichment: {
+    ...certSelectionFields,
+    ...metricSelectionFields,
+    peer_cohort_incomplete: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when deferred peer CERTs were excluded from every statistic; rerun with deferred_certs as peer_certs or use a smaller cohort.',
+      ),
     notice: z
       .string()
       .optional()
@@ -181,6 +197,7 @@ export const comparePeersTool = tool('fdic_compare_peers', {
       ),
   },
 
+  enrichmentTrailer: { ...certSelectionTrailer, ...metricSelectionTrailer },
   errors: [
     {
       reason: 'cert_not_found',
@@ -251,7 +268,9 @@ export const comparePeersTool = tool('fdic_compare_peers', {
   ],
 
   async handler(input, ctx) {
-    const explicitCerts = input.peer_certs?.length ? [...new Set(input.peer_certs)] : undefined;
+    const selected =
+      input.peer_certs === undefined ? undefined : partitionSelection(input.peer_certs, 200);
+    const explicitCerts = selected?.processed;
     if (explicitCerts && (input.peer_asset_band !== undefined || input.peer_state !== undefined)) {
       const named = [
         input.peer_asset_band !== undefined ? 'peer_asset_band' : undefined,
@@ -275,7 +294,24 @@ export const comparePeersTool = tool('fdic_compare_peers', {
         `peer_state "${input.peer_state}" is not a US state, DC, territory, or same.`,
       );
     }
-    const metrics = resolveMetrics(input.metrics);
+    const projection = partitionSelection(resolveMetrics(input.metrics), 20);
+    const metrics = projection.processed;
+    const notices: string[] = [];
+    if (selected?.deferred.length)
+      notices.push(
+        'Peer cohort incomplete: statistics cover only processed_certs. Pass deferred_certs as peer_certs in a new call; peer_certs_missing covers only processed peers.',
+      );
+    if (projection.deferred.length)
+      notices.push('Pass deferred_metrics as metrics in a new call for the remaining comparisons.');
+    ctx.enrich({
+      processed_metrics: metrics,
+      deferred_metrics: projection.deferred,
+      peer_cohort_incomplete: Boolean(selected?.deferred.length),
+      ...(selected
+        ? { processed_certs: selected.processed, deferred_certs: selected.deferred }
+        : {}),
+      ...(notices.length ? { selection_notice: notices.join(' ') } : {}),
+    });
 
     const service = getFdicService();
     const budget = callBudget();

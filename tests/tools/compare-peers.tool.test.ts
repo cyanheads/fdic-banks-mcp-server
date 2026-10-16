@@ -14,6 +14,7 @@ import { createPacer } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { comparePeersTool } from '@/mcp-server/tools/definitions/compare-peers.tool.js';
 import { disposeFdicService } from '@/services/fdic/fdic-service.js';
+import { METRIC_NAMES } from '@/services/fdic/metric-catalog.js';
 import { BRIDGE_BANK, FAILED_BANK, HARBOR_BANK } from '../fixtures/fdic-records.js';
 import {
   envelope,
@@ -109,6 +110,32 @@ async function handle(input: Input) {
 }
 
 describe('comparison', () => {
+  it('marks a deferred peer cohort incomplete and excludes deferrals from missing peers and statistics', async () => {
+    withOwnRow();
+    withPeers([{ CERT: 1, ROAQ: 2, ID: '1_20260630' }]);
+    const certs = Array.from({ length: 202 }, (_, i) => i + 1);
+    const { result, text } = await run({
+      cert: CERT,
+      report_date: '2026Q2',
+      peer_certs: [1, ...certs],
+      metrics: ['roa', ...METRIC_NAMES],
+    });
+    const data = structured<Record<string, unknown>>(result);
+    expect(data.processed_certs).toEqual(certs.slice(0, 200));
+    expect(data.deferred_certs).toEqual([201, 202]);
+    expect(data.peer_cohort_incomplete).toBe(true);
+    expect(data.peer_certs_missing).toEqual(certs.slice(1, 200));
+    expect(data.processed_metrics).toHaveLength(20);
+    expect(data.deferred_metrics).toHaveLength(METRIC_NAMES.length - 20);
+    expect(peerParams().filters).toContain(' OR 200)');
+    expect(peerParams().filters).not.toContain(' OR 201');
+    expect(text).toContain('Peer cohort incomplete');
+    expect(text).toContain('Deferred CERTs (not queried): 201, 202');
+    expect((data.comparisons as Array<{ metric: string; peer_median: number }>)[0]).toMatchObject({
+      metric: 'roa',
+      peer_median: 2,
+    });
+  });
   it('compares against the same asset band nationwide for the latest published quarter', async () => {
     withLatest();
     withOwnRow();
@@ -145,7 +172,7 @@ describe('comparison', () => {
         'Institutions with total assets of $1–10 billion that filed a Call Report for 2026-06-30, nationwide, excluding CERT 57701 itself.',
     });
     expect(output.data_as_of).toBe(INDEX.financials.createTimestamp);
-    expect(enrichment).toEqual({
+    expect(enrichment).toMatchObject({
       notice: 'Fewer than five peers reported roa, cet1_ratio; their quartiles are not meaningful.',
     });
   });
@@ -310,7 +337,7 @@ describe('peer group', () => {
       rank: 1,
       rank_of: 1,
     });
-    expect(enrichment).toEqual({
+    expect(enrichment).toMatchObject({
       notice:
         'No institutions matched the peer group; set peer_asset_band to any or drop peer_state.',
     });
@@ -358,7 +385,7 @@ describe('peer group', () => {
     });
   });
 
-  it('treats blank report_date, band, and state and an empty peer list as unset', async () => {
+  it('treats blank report_date, band, and state as unset', async () => {
     withLatest();
     withOwnRow();
     withPeers();
@@ -368,7 +395,6 @@ describe('peer group', () => {
       report_date: '',
       peer_asset_band: ' ',
       peer_state: '',
-      peer_certs: [],
     } as unknown as Input);
     const output = structured<Output>(result);
     expect(output).toMatchObject({ report_date_defaulted: true, report_date: '2026-06-30' });
@@ -674,9 +700,12 @@ describe('errors', () => {
     ['quarter 0', { report_date: '2026Q0' }],
     ['a zero cert', { cert: 0 }],
     ['a zero peer CERT', { peer_certs: [0] }],
-    ['more than 200 peer CERTs', { peer_certs: Array.from({ length: 201 }, (_, i) => i + 1) }],
+    [
+      'more than 1000 raw peer CERTs',
+      { peer_certs: Array.from({ length: 1001 }, (_, i) => i + 1) },
+    ],
     ['an unknown band', { peer_asset_band: 'huge' }],
-    ['more than 20 metrics', { metrics: Array.from({ length: 21 }, () => 'roa') }],
+    ['more than 1000 raw metrics', { metrics: Array.from({ length: 1001 }, () => 'roa') }],
   ])('rejects %s at the schema', async (_label, input) => {
     const { result } = await run({ cert: CERT, ...input } as Input);
     expect(toolError(result)).toMatchObject({

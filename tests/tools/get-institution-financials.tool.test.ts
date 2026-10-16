@@ -13,7 +13,7 @@ import { createPacer } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getInstitutionFinancialsTool } from '@/mcp-server/tools/definitions/get-institution-financials.tool.js';
 import { disposeFdicService } from '@/services/fdic/fdic-service.js';
-import { ZERO_UNREPORTED_NOTE } from '@/services/fdic/metric-catalog.js';
+import { METRIC_NAMES, ZERO_UNREPORTED_NOTE } from '@/services/fdic/metric-catalog.js';
 import {
   DEFAULT_METRIC_FIELDS,
   FAILED_BANK,
@@ -75,6 +75,23 @@ async function handle(input: Input) {
 }
 
 describe('requests', () => {
+  it('caps history and metric execution while returning continuation on both surfaces', async () => {
+    withProfile();
+    withHistory([]);
+    const { result, text } = await run({
+      cert: CERT,
+      quarters: 201,
+      metrics: [METRIC_NAMES[0], ...METRIC_NAMES],
+    });
+    const data = structured<Record<string, unknown>>(result);
+    expect(historyParams().limit).toBe('200');
+    expect(data.effective_quarters).toBe(200);
+    expect(data.processed_metrics).toEqual(METRIC_NAMES.slice(0, 25));
+    expect(data.deferred_metrics).toEqual(METRIC_NAMES.slice(25));
+    expect(text).toContain('Deferred metrics (not queried):');
+    expect(text).toContain('continue with to_date before the oldest returned quarter');
+    expect(data.rows).toEqual([]);
+  });
   it('reads the profile and the default-set history in two requests, most recent first', async () => {
     withProfile();
     withHistory(
@@ -212,7 +229,7 @@ describe('notices', () => {
     });
     expect(output.rows).toEqual([]);
     expect(output.quarters_available).toBe(0);
-    expect(enrichment).toEqual({
+    expect(enrichment).toMatchObject({
       notice:
         'No Call Reports for CERT 57701 between 1990-03-31 and 1990-12-31; its reports run through 2026-06-30. Widen from_date/to_date or omit them.',
     });
@@ -228,7 +245,7 @@ describe('notices', () => {
       successor_cert: 58812,
       last_report_date: '2022-12-31',
     });
-    expect(enrichment).toEqual({
+    expect(enrichment).toMatchObject({
       notice:
         'Inactive since 2023-03-10; its last report is 2022-12-31. Successor CERT 58812 continues the franchise.',
     });
@@ -241,12 +258,12 @@ describe('notices', () => {
       156,
     );
     const { enrichment } = await handle({ cert: 24900, quarters: 2 });
-    expect(enrichment).toEqual({
+    expect(enrichment).toMatchObject({
       truncated: true,
       shown: 2,
       cap: 2,
       notice:
-        'Inactive since 2023-03-10; its last report is 2022-12-31. Successor CERT 58812 continues the franchise. Showing the latest 2 of 156 quarters; raise quarters or narrow from_date/to_date.',
+        'Inactive since 2023-03-10; its last report is 2022-12-31. Successor CERT 58812 continues the franchise. Showing the latest 2 of 156 quarters; raise quarters up to 200 or continue with to_date before the oldest returned quarter.',
     });
   });
 
@@ -254,7 +271,7 @@ describe('notices', () => {
     withProfile();
     withHistory(QUARTERS.map((q) => healthRow(CERT, q)));
     const { enrichment } = await handle({ cert: CERT });
-    expect(enrichment).toEqual({});
+    expect(enrichment).not.toHaveProperty('notice');
   });
 });
 
@@ -435,8 +452,8 @@ describe('errors', () => {
     ['a US-format date', { to_date: '06/30/2026' }],
     ['an unknown metric', { metrics: ['tier1_capital'] }],
     ['a raw FDIC field as a metric', { metrics: ['ROA'] }],
-    ['more than 25 metrics', { metrics: Array.from({ length: 26 }, () => 'roa') }],
-    ['quarters over 200', { quarters: 201 }],
+    ['more than 1000 raw metrics', { metrics: Array.from({ length: 1001 }, () => 'roa') }],
+    ['quarters over safety ceiling', { quarters: 10_001 }],
     ['quarters 0', { quarters: 0 }],
   ])('rejects %s at the schema', async (_label, extra) => {
     const { result } = await run({ cert: CERT, ...extra } as Input);
