@@ -48,10 +48,10 @@ Every FDIC-insured bank and savings institution, open, merged, or failed, from t
 
 ### Dataframe workflow
 
-1. `fdic_query_financials` and `fdic_get_deposits` return an inline preview. When the full result is larger than `limit`, they also stage it as a `df_XXXXX_XXXXX` table and name it in the response's `dataset` field.
-2. Pass that name to `fdic_dataframe_describe` for the table's columns and the unit and basis of each numeric column.
+1. `fdic_query_financials` and `fdic_get_deposits` return an inline preview. When the full result is larger than `limit`, they also stage it as a `df_XXXXX_XXXXX` table and name it in the `dataset` field.
+2. Pass that name to `fdic_dataframe_describe` for the table's columns, units, and basis.
 3. Query it with `fdic_dataframe_query`: joins, aggregates, window functions, and CTEs across every staged table. `register_as` saves a result as a new table.
-4. Tables expire after `FDIC_DATASET_TTL_SECONDS` (default 24 hours), and the live tables hold 1,000,000 rows together: past that, the oldest are dropped to make room. With `FDIC_DATAFRAME_DROP_ENABLED=true`, `fdic_dataframe_drop` removes one sooner.
+4. Tables expire after `FDIC_DATASET_TTL_SECONDS` (default 24 hours). The live tables hold 1,000,000 rows together, and the oldest are dropped past that.
 
 Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns it off. The Claude Desktop `.mcpb` bundle ships without DuckDB's native binding, so there the dataframe tools report an install hint and every other tool works normally.
 
@@ -59,49 +59,49 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 
 ### `fdic_search_institutions` <sub>tool</sub>
 
-- Filters: `name` (up to 100 characters; every word must match a current, former, or trade name), `certs` (first 50 unique CERTs per call), `state`, `city`, `bank_classes`, `min_assets` / `max_assets` (thousands of US dollars), `holding_company_rssd`
-- `status` is `active`, `inactive`, or `any`; it defaults to `any` when `name` or `certs` is given and `active` otherwise, and the applied value comes back as `status_filter`
-- Up to 100 per page (default 20), paged with `offset` / `next_offset`; records carry `active`, `successor_cert` for merged or failed banks, `holding_company.rssd`, and `matched_on` when a former or trade name matched; requested CERTs with no record land in `missing_certs`
+- Filters: `name` (up to 100 characters; every word must match a current, former, or trade name), `certs` (first 50 unique), `state`, `city`, `bank_classes`, `min_assets` / `max_assets` (thousands of US dollars), `holding_company_rssd`
+- `status` is `active`, `inactive`, or `any`; it defaults to `any` when `name` or `certs` is given and `active` otherwise, and `status_filter` reports the value applied
+- Up to 100 per page (default 20), paged with `offset` / `next_offset`. Records carry `active`, `successor_cert` for merged or failed banks, `holding_company.rssd`, and `matched_on`; CERTs with no record land in `missing_certs`
 
 ---
 
 ### `fdic_get_institution_financials` <sub>tool</sub>
 
-- `cert` required; first 25 unique `metrics` per call (default: a 15-metric health set); `quarters` accepts 1–10,000 and queries at most 200 (default 8), optionally bounded by `from_date` / `to_date` as `2025-03-31`, `20250331`, or `2025Q1`. Continue earlier history with `to_date` before the oldest returned quarter
+- `cert` required; up to 25 `metrics` (default: a 15-metric health set); `quarters` accepts 1–10,000 and queries at most 200 (default 8), bounded by `from_date` / `to_date` as `2025-03-31`, `20250331`, or `2025Q1`
 - Rows run most recent first, each a `values` map of metric → number, `null` when not reported; `metric_definitions` gives each metric's FDIC field, unit, and basis
-- `quarters_available` counts the quarters in the window before the cap; an unknown CERT fails as `cert_not_found`
+- `quarters_available` counts the quarters in the window; an unknown CERT fails as `cert_not_found`
 
 ---
 
 ### `fdic_compare_peers` <sub>tool</sub>
 
 - `cert` required; `report_date` defaults to the latest published quarter (`report_date_defaulted`); up to 20 `metrics`
-- Peer group: `peer_asset_band` (`same` by default, `any`, `under_100m`, `100m_1b`, `1b_10b`, `10b_250b`, `over_250b`) plus an optional `peer_state`, or `peer_certs` (first 200 unique CERTs), which can't be combined with the band or state (`conflicting_peer_filters`). Deferred peers mark `peer_cohort_incomplete`; statistics cover only processed peers
-- Each comparison returns the institution's `value`, `peer_median`, `peer_p25` / `peer_p75`, `peer_min` / `peer_max`, `percentile`, and `rank` of `rank_of`, over the `peer_count_with_value` peers that reported the metric
+- Peer group: `peer_asset_band` (`same` by default, `any`, `under_100m`, `100m_1b`, `1b_10b`, `10b_250b`, `over_250b`) plus an optional `peer_state`, or `peer_certs` (first 200 unique); `peer_certs` can't be combined with the band or state (`conflicting_peer_filters`)
+- Each comparison returns `value`, `peer_median`, `peer_p25` / `peer_p75`, `peer_min` / `peer_max`, `percentile`, and `rank` of `rank_of`, over the `peer_count_with_value` peers that reported the metric; `peer_cohort_incomplete` marks a peer group only partly processed
 
 ---
 
 ### `fdic_query_financials` <sub>tool</sub>
 
-- Filters: first 100 unique `certs`, `state`, `min_assets` / `max_assets`, and up to 5 `metric_filters` (`metric` with `min` and/or `max` in the metric's unit); first 30 unique `metrics`, plus every sort/filter metric; `from_date` / `to_date`, defaulting to the latest published quarter only
-- Positive inline `limit` (default 50), bounded by the fetched panel, ordered by `sort_by` / `sort_order`; a panel larger than the preview is staged whole as a dataframe
-- The panel is capped at `FDIC_PANEL_MAX_ROWS` (default 50,000) and keeps the newest quarters when it binds; `total_matching`, `rows_fetched`, and `panel_truncated` report what was left out
+- Filters: up to 100 `certs`, `state`, `min_assets` / `max_assets`, up to 5 `metric_filters` (`metric` with `min` and/or `max`), and up to 30 `metrics`; `from_date` / `to_date` default to the latest published quarter
+- Inline `limit` defaults to 50, ordered by `sort_by` / `sort_order`; a larger panel is staged whole as a dataframe
+- The panel is capped at `FDIC_PANEL_MAX_ROWS` (default 50,000), keeping the newest quarters; `total_matching`, `rows_fetched`, and `panel_truncated` report what was left out
 
 ---
 
 ### `fdic_search_failures` <sub>tool</sub>
 
-- Filters: `name`, `certs` (first 50 unique CERTs; events before 1977 carry none), `state`, `from_date` / `to_date` (YYYY-MM-DD), `methods`, `min_assets`; `resolution` is `failure` by default, or `assistance` or `all`
-- `summary` totals every matching event, not just the page, with a `by_method` breakdown; `group_by` (`year`, `state`, `method`, `insurance_fund`) adds `groups`
-- `total_assets_missing_count`, `total_deposits_missing_count`, and `estimated_loss_missing_count` count unreported amounts over every match. A total is `null` when a nonempty set has no recorded amount; partial sums cover recorded values, and empty sets total zero. Method subtotals include assets and losses. `sort` by date, loss, or assets, up to 200 per page (default 25)
+- Filters: `name`, `certs` (first 50 unique; events before 1977 carry none), `state`, `from_date` / `to_date` (YYYY-MM-DD), `methods`, `min_assets`; `resolution` is `failure` by default, or `assistance` or `all`
+- `summary` totals every matching event with a `by_method` breakdown; `group_by` (`year`, `state`, `method`, `insurance_fund`) adds `groups`
+- `total_assets_missing_count`, `total_deposits_missing_count`, and `estimated_loss_missing_count` count unreported amounts, and a total is `null` when no match has a recorded amount. `sort` by date, loss, or assets; up to 200 per page (default 25)
 
 ---
 
 ### `fdic_get_deposits` <sub>tool</sub>
 
-- `cert` alone returns the institution's branches and its deposit share in each state (`mode: "institution"`); a geography (`state`, `county`, `city`, `zip`, `msa_code`) ranks every institution in that market with `hhi` (`market`); both give the institution's `position` in the market (`institution_in_market`). `county` and `city` require `state`
+- `cert` alone returns the institution's branches and deposit share in each state (`mode: "institution"`); a geography (`state`, `county`, `city`, `zip`, `msa_code`) ranks every institution in that market with `hhi` (`market`); both together give `institution_in_market`. `county` and `city` require `state`
 - `year` from 1994 on, defaulting to the latest survey (`year_defaulted`); deposits are domestic branch deposits as of June 30, in thousands of US dollars
-- Positive inline `limit` (default 25), bounded by the fetched branches or ranking; a larger set is staged as a dataframe, and `total_rows` gives the full count
+- Inline `limit` defaults to 25; a larger set is staged as a dataframe, and `total_rows` gives the full count
 
 ---
 
@@ -114,8 +114,8 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 
 ### `fdic_dataframe_describe` <sub>tool</sub>
 
-- `name` (a `df_XXXXX_XXXXX` from a `dataset` field) returns that table in full: source tool, the parameters it was called with, row count, expiry, `column_schema`, and `column_units`
-- Without `name`, lists the live tables newest first, 50 per page, paged with `offset` / `next_offset`. Over HTTP with `MCP_AUTH_MODE=none`, where every caller shares one canvas, the listing is off and fails as `listing_unavailable`; a table is reached by its name
+- `name` (a `df_XXXXX_XXXXX` from a `dataset` field) returns that table's source tool, parameters, row count, expiry, `column_schema`, and `column_units`
+- Without `name`, lists live tables newest first, 50 per page, paged with `offset` / `next_offset`; over HTTP with `MCP_AUTH_MODE=none` listing is off and fails as `listing_unavailable`
 - Fails as `canvas_unavailable` when dataframe staging is off
 
 ---
@@ -123,8 +123,8 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 ### `fdic_dataframe_query` <sub>tool</sub>
 
 - One `SELECT` per call, up to 20,000 characters; writes, DDL, file-reading functions, and system catalogs are rejected with typed reasons (`non_select_statement`, `denied_function`, `system_catalog_access`, and others)
-- `row_limit` accepts 1–1,000,000 (default 1,000) and executes at most 10,000; `row_count_capped` reports when more rows matched. `preview` is a nonnegative inline row count clamped to the effective `row_limit`. Responses report requested and effective bounds; continue with stable `ORDER BY` and `LIMIT`/`OFFSET` pages
-- `register_as` saves the result as a new dataframe with a fresh TTL, or fails as `register_as_too_large` when the result alone passes 1,000,000 rows; `BIGINT` results such as `COUNT(*)` come back as strings
+- `row_limit` accepts 1–1,000,000 (default 1,000) and executes at most 10,000; `row_count_capped` reports when more rows matched. `preview` sets the inline row count
+- `register_as` saves the result as a new dataframe, or fails as `register_as_too_large` past 1,000,000 rows; `BIGINT` results such as `COUNT(*)` come back as strings
 
 ---
 
@@ -135,24 +135,22 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 
 ## Features
 
-Read selections accept at most 1,000 raw array items and deduplicate in request order before execution caps. Explicitly empty `certs`, `peer_certs`, `bank_classes`, and `methods` are rejected; omit them for unrestricted/default selection. Empty `metrics` retains the default health set, and empty `metric_filters` adds no predicates. `metric_filters` is an atomic conjunction: more than five predicates is rejected without querying. `processed_certs` / `deferred_certs` and `processed_metrics` / `deferred_metrics` distinguish queried items from deferred items on both output surfaces; pass deferred items in a new call. Missing-ID fields, totals, statistics, and staged query metadata cover only the processed selection. Institution/failure page `limit` accepts up to 10,000 and applies caps of 100/200, reported as `effective_limit`; continue with `next_offset`.
-
 Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 FDIC-specific:
 
 - Reads four BankFind datasets: institutions (every insured charter, active and inactive), quarterly Call Report financials from 1984, failures and assistance transactions from 1934, and the annual Summary of Deposits from 1994
-- Shared request pacer: request starts capped at `FDIC_RATE_LIMIT_RPS`, at most four in flight, a cooldown that holds every caller after an FDIC 429, and an in-process response cache; each call runs under one 45-second budget (55 seconds for a panel), so an error arrives inside a typical 60-second client timeout
+- Paced requests (`FDIC_RATE_LIMIT_RPS`, at most four in flight) with a response cache and a cooldown after an FDIC 429; each call has a 45-second budget (55 seconds for a panel)
 - A curated catalog of 49 Call Report metrics with FDIC field code, unit, and basis; `_ytd` metrics accumulate from January 1, and unsuffixed income and return metrics cover a single quarter
 - Handles BankFind's quirks: case-sensitive code values, string-typed report dates, absence sentinels, and ratios reported as `0` when a bank did not report them
-- Peer statistics cover the processed cohort; deposit market share and HHI use every institution in the selected market
+- Array inputs are deduplicated in order and capped at 1,000 items; empty `certs`, `peer_certs`, `bank_classes`, and `methods` are rejected
 
 Agent-friendly output:
 
-- Provenance on every data response: `data_as_of` (the FDIC index build time), `metric_definitions` with unit and basis, and `report_date_defaulted` / `year_defaulted` flags when the server picked the period
-- No fabricated values: unreported metrics come back `null`, and failure totals distinguish recorded zero from missing assets, deposits, and loss estimates
+- Every data response carries `data_as_of`, `metric_definitions`, and `report_date_defaulted` / `year_defaulted` when the server picked the period
+- Unreported metrics come back `null`; nothing is filled in
 - Typed errors with recovery text that names the next call (`cert_not_found`, `conflicting_peer_filters`, `no_report_for_period`); rate-limit errors (`pacer_shed`, `upstream_rate_limited`) carry `retryAfter`
-- Staged dataframes keep their provenance and per-column units, so SQL results stay interpretable
+- `processed_certs` / `deferred_certs` and `processed_metrics` / `deferred_metrics` separate what was queried from what to pass in a new call
 
 ## Getting started
 
