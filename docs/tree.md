@@ -1,6 +1,6 @@
 # fdic-banks-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 14:41:01
+Generated on: 2026-10-28 17:19:33
 
 ```text
 fdic-banks-mcp-server/
@@ -26,6 +26,7 @@ fdic-banks-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   └── design.md

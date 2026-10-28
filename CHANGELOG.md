@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-28 · ⚠️ Breaking
+
+New fdic_get_institution_history tool for mergers, failures, renames, and charter changes; a published skill resource; offset paging for financials and deposits; numbers at full precision and table cells that keep line breaks; concurrent dataframe saves no longer lost; mcp-ts-core 0.13.18.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-16 · ⚠️ Breaking
 
 Bounded reads disclose deferred selections and failure totals preserve missing amounts.
