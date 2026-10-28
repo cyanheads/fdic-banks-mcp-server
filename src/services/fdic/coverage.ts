@@ -33,6 +33,13 @@ export const COVERAGE: readonly DatasetCoverage[] = [
     cadence: 'one record per event',
   },
   {
+    code: 'history',
+    label:
+      'Structure-change events: mergers, failures, branch purchases and sales, renames, relocations, charter changes, openings, and closings',
+    starts: '1969 for mergers and 1970 for failures; founding records carry dates back to 1782',
+    cadence: 'one record per change, by its effective date',
+  },
+  {
     code: 'institutions',
     label: 'Institution structure and status: every FDIC-insured charter, active and inactive',
     starts: '1934',

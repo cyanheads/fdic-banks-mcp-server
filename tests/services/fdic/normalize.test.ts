@@ -1,18 +1,23 @@
 /**
  * @fileoverview Tests for the BankFind row normalizers over recorded-shape rows:
  * numeric coercion, ISO dates, blanks and absence sentinels dropped to absent,
- * and zero-means-unreported ratios nulled.
+ * zero-means-unreported ratios nulled, and `/history` rows turned into events —
+ * the one-event-per-exit pairing rule, role and counterparty, recorded changes,
+ * and newest-first order.
  * @module tests/services/fdic/normalize.test
  */
 
 import { describe, expect, it } from 'vitest';
 import {
+  historyEvents,
+  historyRow,
   metricValues,
   normalizeFailure,
   normalizeInstitution,
   num,
   str,
 } from '@/services/fdic/normalize.js';
+import type { HistoryRow } from '@/services/fdic/types.js';
 import {
   ASSISTANCE_EVENT,
   BRIDGE_BANK,
@@ -23,6 +28,7 @@ import {
   SPARSE_FAILURE,
   ZERO_COST_FAILURE,
 } from '../../fixtures/fdic-records.js';
+import { HISTORY } from '../../helpers/fake-fdic.js';
 
 describe('scalar coercion', () => {
   it('reads finite numbers from numbers and numeric strings only', () => {
@@ -233,5 +239,385 @@ describe('metricValues', () => {
       total_assets: 10,
       brokered_deposits: null,
     });
+  });
+});
+
+/** Raw `/history` data as the row the service reads; fails the test on a malformed row. */
+function rows(...data: Record<string, unknown>[]): HistoryRow[] {
+  return data.map((d) => {
+    const row = historyRow({ data: { ...d } });
+    if (!row) throw new Error(`Malformed history fixture ${JSON.stringify(d)}`);
+    return row;
+  });
+}
+
+describe('historyRow', () => {
+  it('keeps the ID, the ISO effective date, the code, and the label verbatim', () => {
+    expect(historyRow({ data: { ...HISTORY.svbFailure } })).toMatchObject({
+      id: '2023009929_211_17167_655043_17167',
+      effectiveDate: '2023-03-10',
+      changeCode: 211,
+      changeDescription: 'Failure - Whole Institution',
+    });
+  });
+
+  it.each(['ID', 'EFFDATE', 'CHANGECODE', 'CHANGECODE_DESC'])(
+    'rejects a row without %s',
+    (field) => {
+      const data: Record<string, unknown> = { ...HISTORY.svbFailure, [field]: '' };
+      expect(historyRow({ data })).toBeUndefined();
+    },
+  );
+});
+
+describe('historyEvents: one event per exit', () => {
+  it('keeps the outgoing row of a two-sided merger, seen from the outgoing bank', () => {
+    const events = historyEvents(867, rows(HISTORY.truistMergerSurvivor, HISTORY.truistMerger), []);
+    expect(events).toEqual([
+      {
+        effective_date: '2019-12-07',
+        event_type: 'merger',
+        change_code: 223,
+        change_description: 'Merger -Without Assistance',
+        role: 'outgoing',
+        counterparty: { cert: 9846, name: 'Truist Bank' },
+        transaction_number: 201911532,
+      },
+    ]);
+  });
+
+  it('keeps the outgoing row of the same merger seen from the survivor, without the FRM_ fields as changes', () => {
+    const events = historyEvents(
+      9846,
+      rows(HISTORY.truistMerger, HISTORY.truistMergerSurvivor),
+      [],
+    );
+    expect(events).toEqual([
+      {
+        effective_date: '2019-12-07',
+        event_type: 'merger',
+        change_code: 223,
+        change_description: 'Merger -Without Assistance',
+        role: 'survivor',
+        counterparty: { cert: 867, name: 'SunTrust Bank' },
+        transaction_number: 201911532,
+      },
+    ]);
+  });
+
+  it('pairs a failure whose outgoing row carries no CERT (211) and drops the 811 twin', () => {
+    const pair = rows(HISTORY.svbFailure, HISTORY.svbFailureSurvivor);
+    expect(historyEvents(24735, pair, [])).toEqual([
+      expect.objectContaining({
+        event_type: 'failure_or_assistance',
+        change_code: 211,
+        role: 'outgoing',
+        counterparty: { cert: 59331, name: 'Deposit Insurance National Bank of Santa Clara' },
+      }),
+    ]);
+    expect(historyEvents(59331, pair, [])).toEqual([
+      expect.objectContaining({
+        change_code: 211,
+        role: 'survivor',
+        counterparty: { cert: 24735, name: 'Silicon Valley Bank' },
+      }),
+    ]);
+  });
+
+  it('pairs an affiliated merger (224, no CERT on the outgoing row) as one merger', () => {
+    const pair = rows(HISTORY.affiliatedMergerSurvivor, HISTORY.affiliatedMerger);
+    expect(historyEvents(3510, pair, [])).toEqual([
+      expect.objectContaining({
+        event_type: 'merger',
+        change_code: 224,
+        role: 'survivor',
+        counterparty: { cert: 58026, name: 'Recontrust Company, National Association' },
+      }),
+    ]);
+    expect(historyEvents(58026, pair, [])).toEqual([
+      expect.objectContaining({ change_code: 224, role: 'outgoing' }),
+    ]);
+  });
+
+  it('classifies a failed-bank takeover by the outgoing row, keeping its code on the survivor side', () => {
+    for (const order of [
+      [HISTORY.firstRepublicSurvivor, HISTORY.firstRepublicFailure],
+      [HISTORY.firstRepublicFailure, HISTORY.firstRepublicSurvivor],
+    ]) {
+      expect(historyEvents(628, rows(...order), [])).toEqual([
+        {
+          effective_date: '2023-05-01',
+          event_type: 'failure_or_assistance',
+          change_code: 211,
+          change_description: 'Failure - Whole Institution',
+          role: 'survivor',
+          counterparty: { cert: 59017, name: 'First Republic Bank' },
+          transaction_number: 2023160984,
+        },
+      ]);
+    }
+  });
+
+  it('keeps an exit recorded only on the survivor side (810 without an outgoing partner) once', () => {
+    const lone = rows(HISTORY.survivorSideOnly);
+    expect(historyEvents(4827, lone, [])).toEqual([
+      expect.objectContaining({
+        event_type: 'merger',
+        change_code: 810,
+        role: 'outgoing',
+        counterparty: { cert: 4857, name: 'The First National Bank of Oakland' },
+      }),
+    ]);
+    expect(historyEvents(4857, lone, [])).toEqual([
+      expect.objectContaining({
+        role: 'survivor',
+        counterparty: { cert: 4827, name: 'The First National Bank of Barton' },
+      }),
+    ]);
+  });
+
+  it('keeps an outgoing-side row (223) with no survivor row in the response once', () => {
+    expect(historyEvents(19700, rows(HISTORY.outgoingSideOnly), [])).toEqual([
+      expect.objectContaining({
+        event_type: 'merger',
+        change_code: 223,
+        role: 'survivor',
+        counterparty: { cert: 19442, name: 'Island State Bank' },
+      }),
+    ]);
+  });
+
+  /** 19700's side of transaction 910005375, which FDIC recorded without OUT_CERT. */
+  const survivorWithoutOutgoing = {
+    ID: '910005375_810_13499_13499_16723',
+    TRANSNUM: 910005375,
+    CERT: 19700,
+    CHANGECODE: 810,
+    CHANGECODE_DESC: 'Participated in Absorbtion/Consolidation/Merger',
+    EFFDATE: '1991-05-08T00:00:00',
+    SUR_CERT: 19700,
+    SUR_INSTNAME: 'The International Bank',
+    ACQ_CERT: 19700,
+    ACQ_INSTNAME: 'The International Bank',
+  };
+
+  it('pairs a survivor-side 810 without OUT_CERT with the outgoing row of its transaction that names it survivor', () => {
+    for (const order of [
+      [survivorWithoutOutgoing, HISTORY.outgoingSideOnly],
+      [HISTORY.outgoingSideOnly, survivorWithoutOutgoing],
+    ]) {
+      expect(historyEvents(19700, rows(...order), [])).toEqual([
+        {
+          effective_date: '1991-05-08',
+          event_type: 'merger',
+          change_code: 223,
+          change_description: 'Merger -Without Assistance',
+          role: 'survivor',
+          counterparty: { cert: 19442, name: 'Island State Bank' },
+          transaction_number: 910005375,
+        },
+      ]);
+    }
+    const pair = rows(HISTORY.outgoingSideOnly, survivorWithoutOutgoing);
+    expect(historyEvents(19442, pair, []).map((e) => [e.change_code, e.role])).toEqual([
+      [223, 'outgoing'],
+    ]);
+  });
+
+  it.each([
+    ['another transaction', { TRANSNUM: 910005376 }],
+    ['another survivor', { SUR_CERT: 19701 }],
+  ])('keeps a survivor-side 810 without OUT_CERT apart from an outgoing row of %s', (_, differ) => {
+    const events = historyEvents(
+      19700,
+      rows(survivorWithoutOutgoing, { ...HISTORY.outgoingSideOnly, ...differ }),
+      [],
+    );
+    expect(events).toHaveLength(2);
+    expect(events.map((e) => [e.change_code, e.counterparty?.cert])).toEqual(
+      expect.arrayContaining([
+        [810, undefined],
+        [223, 19442],
+      ]),
+    );
+  });
+
+  it('keeps a survivor-side row without OUT_CERT on its own, with no counterparty', () => {
+    const events = historyEvents(
+      628,
+      rows(
+        HISTORY.assistedWithoutOutgoing,
+        HISTORY.firstRepublicSurvivor,
+        HISTORY.firstRepublicFailure,
+      ),
+      [],
+    );
+    expect(events.map((e) => [e.change_code, e.role, e.counterparty])).toEqual([
+      [211, 'survivor', { cert: 59017, name: 'First Republic Bank' }],
+      [811, 'survivor', undefined],
+    ]);
+    expect(events[1]).not.toHaveProperty('counterparty');
+  });
+});
+
+describe('historyEvents: roles, counterparties, and changes', () => {
+  it('reads a branch purchase as buyer (counterparty the seller) or seller (counterparty the buyer)', () => {
+    const events = historyEvents(867, rows(HISTORY.branchPurchase, HISTORY.branchSale), []);
+    expect(events.map((e) => [e.event_type, e.role, e.counterparty])).toEqual([
+      ['branch_purchase', 'buyer', { cert: 22238, name: 'Omni National Bank' }],
+      ['branch_purchase', 'seller', { cert: 28838, name: 'FloridaFirst Bank' }],
+    ]);
+    // The FRM_ fields of a purchase row describe the seller, not a change to 867.
+    expect(events[0]).not.toHaveProperty('changes');
+  });
+
+  it('names the former certificate of a code 150 CERT change and lists only the attributes that differ', () => {
+    expect(historyEvents(20442, rows(HISTORY.certReplaced), [])).toEqual([
+      {
+        effective_date: '1971-06-17',
+        event_type: 'charter_change',
+        change_code: 150,
+        change_description: 'Cert Changed from Old Cert by Administrative Order',
+        role: 'subject',
+        counterparty: { cert: 90054, name: 'Meriden Trust & Safe Deposit Company' },
+        changes: {
+          name: {
+            from: 'Meriden Trust & Safe Deposit Company',
+            to: 'The Meriden Trust and Safe Deposit Company',
+          },
+          bank_class: { from: 'NC', to: 'NM' },
+          regulator: { from: 'STATE', to: 'FDIC' },
+        },
+      },
+    ]);
+  });
+
+  it('lists a rename with the address and city that moved in the same row, and nothing that stayed', () => {
+    const [rename] = historyEvents(9846, rows(HISTORY.truistRename), []);
+    expect(rename).toMatchObject({ event_type: 'name_change', role: 'subject' });
+    expect(rename?.changes).toEqual({
+      name: { from: 'Branch Banking and Trust Company', to: 'Truist Bank' },
+      address: { from: '200 W 2nd St', to: '214 N Tryon St' },
+      city: { from: 'Winston Salem', to: 'Charlotte' },
+    });
+    expect(rename).not.toHaveProperty('counterparty');
+  });
+
+  it('leaves changes absent when one side of an attribute is unrecorded or nothing differs', () => {
+    const [opening] = historyEvents(
+      24735,
+      rows({
+        ...HISTORY.svbRelocation,
+        CHANGECODE: 110,
+        CHANGECODE_DESC: 'New Institution',
+        FRM_PADDR: '',
+      }),
+      [],
+    );
+    expect(opening).toMatchObject({ event_type: 'opening', role: 'subject' });
+    expect(opening).not.toHaveProperty('changes');
+  });
+
+  it('reads a branch-level row as a branch event of the office, with its own before and after', () => {
+    expect(historyEvents(3511, [], rows(HISTORY.branchRelocation))).toEqual([
+      {
+        effective_date: '2026-09-28',
+        event_type: 'branch',
+        change_code: 520,
+        change_description: 'Change in Physical Location (FO or BR)',
+        role: 'subject',
+        changes: { address: { from: '100 E FLAGLER ST', to: '550 NW 1ST AVE' } },
+        branch: {
+          name: 'EAST FLAGLER STREET BRANCH',
+          number: 7442,
+          address: '550 NW 1ST AVE',
+          city: 'MIAMI',
+          state: 'FL',
+        },
+        transaction_number: 2026028320,
+      },
+    ]);
+  });
+
+  it('leaves blank strings, missing CERTs, and TRANSNUM 0 absent, never 0 or ""', () => {
+    const [event] = historyEvents(
+      867,
+      rows({
+        ...HISTORY.truistMerger,
+        TRANSNUM: 0,
+        SUR_CERT: null,
+        SUR_INSTNAME: '   ',
+      }),
+      [],
+    );
+    expect(event).toEqual({
+      effective_date: '2019-12-07',
+      event_type: 'merger',
+      change_code: 223,
+      change_description: 'Merger -Without Assistance',
+      role: 'outgoing',
+    });
+    const [office] = historyEvents(
+      3511,
+      [],
+      rows({
+        ...HISTORY.branchRelocation,
+        OFF_NAME: '',
+        OFF_NUM: null,
+        OFF_PADDR: '',
+        OFF_PCITY: '',
+        OFF_PSTALP: '',
+      }),
+    );
+    expect(office).not.toHaveProperty('branch');
+    expect(office).not.toHaveProperty('changes');
+  });
+
+  it('classifies a code missing from the table as other', () => {
+    const [event] = historyEvents(
+      24735,
+      rows({ ...HISTORY.svbRelocation, CHANGECODE: 999, CHANGECODE_DESC: 'New Code' }),
+      [],
+    );
+    expect(event).toMatchObject({
+      event_type: 'other',
+      change_code: 999,
+      change_description: 'New Code',
+      role: 'subject',
+    });
+  });
+});
+
+describe('historyEvents: order', () => {
+  it('orders newest first by effective date, then transaction number, then ID, across both levels', () => {
+    const institution = rows(
+      HISTORY.truistRename,
+      {
+        ...HISTORY.truistRename,
+        ID: '201911532_520_6300__',
+        CHANGECODE: 520,
+        CHANGECODE_DESC: 'Change in Physical Location (FO or BR)',
+      },
+      { ...HISTORY.truistRename, ID: 'z_earlier_transaction', TRANSNUM: 201900001 },
+      HISTORY.branchPurchase,
+    );
+    const branch = rows({
+      ...HISTORY.branchRelocation,
+      CERT: 9846,
+      EFFDATE: '2019-12-08T00:00:00',
+    });
+    expect(
+      historyEvents(9846, institution, branch).map((e) => [
+        e.effective_date,
+        e.change_code,
+        e.transaction_number,
+      ]),
+    ).toEqual([
+      ['2019-12-08', 520, 2026028320],
+      ['2019-12-07', 520, 201911532],
+      ['2019-12-07', 510, 201911532],
+      ['2019-12-07', 510, 201900001],
+      ['2009-03-27', 712, 201020269],
+    ]);
   });
 });

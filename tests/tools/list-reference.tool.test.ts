@@ -20,10 +20,12 @@ type Entry = {
   basis?: string;
   cadence?: string;
   code: string;
+  event_type?: string;
   field?: string;
   in_default_set?: boolean;
   label: string;
   lag?: string;
+  level?: string;
   max_assets?: number;
   min_assets?: number;
   note?: string;
@@ -90,6 +92,24 @@ describe('fdic_list_reference', () => {
     expect(text).toContain('**A/A** — Assistance transaction — occurs on ASSISTANCE only');
   });
 
+  it('lists all 41 change codes with FDIC’s label, the event type, and the level each is recorded at', async () => {
+    const { output, text } = await list('change_codes');
+    expect(output.entries).toHaveLength(41);
+    const byCode = new Map(output.entries.map((e) => [e.code, e]));
+    expect(byCode.get('211')).toEqual({
+      code: '211',
+      label: 'Failure - Whole Institution',
+      event_type: 'failure_or_assistance',
+      level: 'institution',
+    });
+    expect(byCode.get('520')).toMatchObject({ event_type: 'relocation', level: 'both' });
+    expect(byCode.get('712')).toMatchObject({ event_type: 'branch_purchase', level: 'both' });
+    expect(byCode.get('713')).toMatchObject({ event_type: 'branch', level: 'branch' });
+    expect(text).toContain(
+      '- **810** — Participated in Absorbtion/Consolidation/Merger — event type merger · level institution',
+    );
+  });
+
   it('lists the insurance funds', async () => {
     const { output } = await list('insurance_funds');
     const funds = ['DIF', 'BIF', 'SAIF', 'RTC', 'FSLIC', 'FDIC'];
@@ -127,6 +147,10 @@ describe('fdic_list_reference', () => {
     });
     expect(byCode.get('summary_of_deposits')?.cadence).toBe('annual, as of June 30');
     expect(byCode.get('failures')).not.toHaveProperty('lag');
+    expect(byCode.get('history')).toMatchObject({
+      starts: '1969 for mergers and 1970 for failures; founding records carry dates back to 1782',
+      cadence: 'one record per change, by its effective date',
+    });
     expect(text).toContain('starts 1934');
   });
 

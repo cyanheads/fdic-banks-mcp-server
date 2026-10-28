@@ -26,8 +26,11 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type { BankClassCode } from './bank-classes.js';
+import type { EventType } from './change-codes.js';
 import { METRIC_CATALOG, type MetricName } from './metric-catalog.js';
 import {
+  historyEvents,
+  historyRow,
   metricValues,
   normalizeBranch,
   normalizeFailure,
@@ -47,6 +50,7 @@ import {
   not,
   notEq,
   notExists,
+  or,
   range,
   repdteToIso,
   usDateToIso,
@@ -63,6 +67,8 @@ import type {
   FailureTotals,
   FdicEnvelope,
   FinancialRow,
+  HistoryEvent,
+  HistoryRow,
   InstitutionRecord,
   InstitutionStatus,
   MetricValues,
@@ -94,7 +100,7 @@ const COOLDOWN_BASE_MS = 5_000;
 const MAX_CACHE_BYTES = 64 * 1024 * 1024;
 const MAX_ENTRY_BYTES = 8 * 1024 * 1024;
 
-type Endpoint = 'institutions' | 'financials' | 'failures' | 'sod';
+type Endpoint = 'institutions' | 'financials' | 'failures' | 'sod' | 'history';
 type Params = Record<string, string | number | undefined>;
 
 /** Transport seam: fetch one URL and return its parsed JSON body. */
@@ -479,6 +485,59 @@ const BRANCH_FIELDS = [
   'SIMS_ESTABLISHED_DATE',
   'SIMS_LATITUDE',
   'SIMS_LONGITUDE',
+].join(',');
+
+/**
+ * Institution-level `/history` fields: the row keys, the four institutions a row
+ * can name (`SUR_`, `OUT_`, `ACQ_`, `FRM_`), and the attributes a change moves.
+ */
+const HISTORY_INSTITUTION_FIELDS = [
+  'ID',
+  'TRANSNUM',
+  'CERT',
+  'CHANGECODE',
+  'CHANGECODE_DESC',
+  'EFFDATE',
+  'SUR_CERT',
+  'SUR_INSTNAME',
+  'OUT_CERT',
+  'OUT_INSTNAME',
+  'ACQ_CERT',
+  'ACQ_INSTNAME',
+  'FRM_CERT',
+  'FRM_INSTNAME',
+  'INSTNAME',
+  'PADDR',
+  'PCITY',
+  'PSTALP',
+  'CLASS',
+  'CHARTAGENT',
+  'REGAGENT',
+  'FRM_PADDR',
+  'FRM_PCITY',
+  'FRM_PSTALP',
+  'FRM_CLASS',
+  'FRM_CHARTAGENT',
+  'FRM_REGAGENT',
+].join(',');
+
+/** Branch-level `/history` fields: the row keys and the office before and after. */
+const HISTORY_BRANCH_FIELDS = [
+  'ID',
+  'TRANSNUM',
+  'CERT',
+  'CHANGECODE',
+  'CHANGECODE_DESC',
+  'EFFDATE',
+  'OFF_NAME',
+  'OFF_NUM',
+  'OFF_PADDR',
+  'OFF_PCITY',
+  'OFF_PSTALP',
+  'FRM_OFF_NAME',
+  'FRM_OFF_PADDR',
+  'FRM_OFF_PCITY',
+  'FRM_OFF_PSTALP',
 ].join(',');
 
 /**
@@ -1156,6 +1215,135 @@ export class FdicService {
   }
 
   // -------------------------------------------------------------------------
+  // Structure-change history
+  // -------------------------------------------------------------------------
+
+  /**
+   * One institution's structure-change events of the given types, newest first,
+   * within an optional effective-date window. Institution-level rows are read
+   * whole — every exit's two rows are needed to pair them, whatever their type or
+   * date — and filtered here; branch-level rows need no pairing, so the window
+   * goes upstream. The two reads run in parallel under one budget.
+   */
+  async getInstitutionHistory(
+    q: { cert: number; eventTypes: readonly EventType[]; from?: string; to?: string },
+    ctx: Context,
+    budget: CallBudget,
+  ): Promise<{ dataAsOf: string; events: HistoryEvent[] }> {
+    const types = new Set(q.eventTypes);
+    const [institution, branch] = await Promise.all([
+      q.eventTypes.some((type) => type !== 'branch')
+        ? this.readHistory(
+            and(
+              eq('ORG_ROLE_CDE', 'FI'),
+              or(eq('CERT', q.cert), eq('OUT_CERT', q.cert), eq('SUR_CERT', q.cert)),
+            ),
+            HISTORY_INSTITUTION_FIELDS,
+            {},
+            ctx,
+            budget,
+          )
+        : undefined,
+      types.has('branch')
+        ? this.readHistory(
+            and(eq('CERT', q.cert), eq('ORG_ROLE_CDE', 'BR')),
+            HISTORY_BRANCH_FIELDS,
+            { ...(q.from ? { from: q.from } : {}), ...(q.to ? { to: q.to } : {}) },
+            ctx,
+            budget,
+          )
+        : undefined,
+    ]);
+    const source = institution ?? branch;
+    if (!source) throw new Error('getInstitutionHistory needs at least one event type.');
+    const events = historyEvents(q.cert, institution?.rows ?? [], branch?.rows ?? []).filter(
+      (event) =>
+        types.has(event.event_type) &&
+        (q.from === undefined || event.effective_date >= q.from) &&
+        (q.to === undefined || event.effective_date <= q.to),
+    );
+    return { dataAsOf: source.dataAsOf, events };
+  }
+
+  /**
+   * Every `/history` row matching `base` within an effective-date window, deduped
+   * by `ID`. `ID` is not sortable and dates tie, so offset paging under a date
+   * sort can repeat or skip rows; instead each page is the window sorted
+   * `EFFDATE` descending and the next page narrows the window's upper bound to
+   * the oldest date read, rereading that date's rows. The upper bound falls with
+   * every page, so the walk ends: a page whose oldest date is below its newest
+   * moves the bound down to that oldest date; a full page holding one date alone
+   * (no CERT has come near: the most on one date is 3,439 rows) has that date
+   * read by offset, sorted by `TRANSNUM`, and the walk continues strictly below it.
+   */
+  private async readHistory(
+    base: Clause | undefined,
+    fields: string,
+    window: { from?: string; to?: string },
+    ctx: Context,
+    budget: CallBudget,
+  ): Promise<{ dataAsOf: string; rows: HistoryRow[] }> {
+    const rows = new Map<string, HistoryRow>();
+    let dataAsOf = '';
+    let upper: { date: string; exclusive: boolean } | undefined = window.to
+      ? { date: window.to, exclusive: false }
+      : undefined;
+    for (;;) {
+      const dates =
+        window.from !== undefined || upper !== undefined
+          ? range('EFFDATE', window.from, upper?.date, {
+              upperExclusive: upper?.exclusive ?? false,
+            })
+          : undefined;
+      const envelope = await this.query(
+        'history',
+        {
+          filters: and(base, dates),
+          fields,
+          sort_by: 'EFFDATE',
+          sort_order: 'DESC',
+          limit: MAX_PAGE,
+        },
+        ctx,
+        budget,
+      );
+      dataAsOf = envelope.dataAsOf;
+      const page = historyRows(envelope);
+      for (const row of page) rows.set(row.id, row);
+      const newest = page[0]?.effectiveDate;
+      const oldest = page.at(-1)?.effectiveDate;
+      if (newest === undefined || oldest === undefined || envelope.total <= page.length) break;
+      if (oldest !== newest) {
+        upper = { date: oldest, exclusive: false };
+        continue;
+      }
+      const day = and(base, range('EFFDATE', oldest, oldest));
+      let total = Number.POSITIVE_INFINITY;
+      for (let offset = 0; offset < total; offset += MAX_PAGE) {
+        const dayPage = await this.query(
+          'history',
+          {
+            filters: day,
+            fields,
+            sort_by: 'TRANSNUM',
+            sort_order: 'DESC',
+            limit: MAX_PAGE,
+            offset,
+          },
+          ctx,
+          budget,
+        );
+        total = dayPage.total;
+        const dayRows = historyRows(dayPage);
+        for (const row of dayRows) rows.set(row.id, row);
+        if (dayRows.length === 0) break;
+      }
+      upper = { date: oldest, exclusive: true };
+    }
+    return { dataAsOf, rows: [...rows.values()] };
+  }
+
+  // -------------------------------------------------------------------------
   // Summary of Deposits
   // -------------------------------------------------------------------------
 
@@ -1306,6 +1494,19 @@ export class FdicService {
     }
     return names;
   }
+}
+
+/** A page's `/history` rows; a row missing a key every row carries fails the call. */
+function historyRows(envelope: FdicEnvelope): HistoryRow[] {
+  return envelope.rows.map((raw) => {
+    const row = historyRow(raw);
+    if (!row) {
+      throw serviceUnavailable(
+        'FDIC returned a history row without its ID, effective date, change code, or change description.',
+      );
+    }
+    return row;
+  });
 }
 
 function namesOf(envelope: FdicEnvelope): Map<number, string> {

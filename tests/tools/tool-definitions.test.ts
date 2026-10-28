@@ -1,6 +1,6 @@
 /**
  * @fileoverview Tests for the buildToolDefinitions barrel handed to createApp():
- * ten tools in a fixed order in every deployment, fdic_dataframe_drop live when
+ * eleven tools in a fixed order in every deployment, fdic_dataframe_drop live when
  * dropping is enabled and wrapped with disabledTool() and its enable hint when
  * it is not.
  * @module tests/tools/tool-definitions.test
@@ -14,6 +14,7 @@ import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 const NAMES = [
   'fdic_search_institutions',
   'fdic_get_institution_financials',
+  'fdic_get_institution_history',
   'fdic_compare_peers',
   'fdic_query_financials',
   'fdic_search_failures',
@@ -25,7 +26,7 @@ const NAMES = [
 ];
 
 describe('buildToolDefinitions', () => {
-  it('registers the same ten tools in the same order whether dropping is enabled or not', () => {
+  it('registers the same eleven tools in the same order whether dropping is enabled or not', () => {
     for (const dropEnabled of [true, false]) {
       expect(buildToolDefinitions({ dropEnabled }).map((t) => t.name)).toEqual(NAMES);
     }

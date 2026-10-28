@@ -94,6 +94,13 @@ describe('.env pre-load', () => {
     );
   });
 
+  it('defaults an empty CANVAS_PROVIDER_TYPE to duckdb', async () => {
+    process.env.CANVAS_PROVIDER_TYPE = '';
+    await boot();
+
+    expect(process.env.CANVAS_PROVIDER_TYPE).toBe('duckdb');
+  });
+
   it('keeps variables already set in the environment over the .env values', async () => {
     process.env.CANVAS_PROVIDER_TYPE = 'duckdb';
     process.env.FDIC_DATAFRAME_DROP_ENABLED = 'false';
@@ -115,7 +122,7 @@ describe('.env pre-load', () => {
 });
 
 describe('createApp wiring', () => {
-  it('hands createApp the server identity, a stateless session posture, and all ten tools', async () => {
+  it('hands createApp the server identity, a stateless session posture, and all eleven tools', async () => {
     const options = await boot();
     expect(options).toMatchObject({
       name: 'fdic-banks-mcp-server',
@@ -130,6 +137,7 @@ describe('createApp wiring', () => {
     expect(options.tools?.map((t) => t.name)).toEqual([
       'fdic_search_institutions',
       'fdic_get_institution_financials',
+      'fdic_get_institution_history',
       'fdic_compare_peers',
       'fdic_query_financials',
       'fdic_search_failures',

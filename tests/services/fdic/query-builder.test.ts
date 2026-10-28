@@ -18,6 +18,7 @@ import {
   normalizeInstitutionName,
   not,
   notExists,
+  or,
   quote,
   REPORT_DATE_PATTERN,
   range,
@@ -56,6 +57,13 @@ describe('clauses', () => {
   it('ANDs only the defined clauses and yields undefined for none', () => {
     expect(and(eq('CERT', 1), undefined, notExists('COST'))).toBe('CERT:1 AND !(_exists_:COST)');
     expect(and(undefined, undefined)).toBeUndefined();
+  });
+
+  it('ORs clauses on different fields in parentheses, so they compose under AND; one stands alone', () => {
+    expect(and(eq('ORG_ROLE_CDE', 'FI'), or(eq('CERT', 867), eq('OUT_CERT', 867)))).toBe(
+      'ORG_ROLE_CDE:"FI" AND (CERT:867 OR OUT_CERT:867)',
+    );
+    expect(or(eq('CERT', 867))).toBe('CERT:867');
   });
 
   it('negates a whole clause, compound or not', () => {

@@ -4,12 +4,19 @@
  * error mapping (400 → InternalError, 429 → upstream_rate_limited, pacer shed →
  * pacer_shed, each rate-limit recovery naming the wait in seconds from the
  * calling tool's contract text; any other HTTP failure keeps only its status
- * fields, never the upstream body). The FDIC boundary is faked at the `getJson` seam; the default
+ * fields, never the upstream body), and the `/history` read: its two queries,
+ * the date-bounded walk that dedupes by ID and ends even when a full page holds
+ * one date, and one deadline across its pages. The FDIC boundary is faked at the `getJson` seam; the default
  * transport is exercised through a faked `fetch` so `fetchWithTimeout` runs for real.
  * @module tests/services/fdic/fdic-service.test
  */
 
-import { JsonRpcErrorCode, McpError, rateLimited } from '@cyanheads/mcp-ts-core/errors';
+import {
+  internalError,
+  JsonRpcErrorCode,
+  McpError,
+  rateLimited,
+} from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
   createMockContext,
@@ -20,6 +27,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { comparePeersTool } from '@/mcp-server/tools/definitions/compare-peers.tool.js';
 import { getDepositsTool } from '@/mcp-server/tools/definitions/get-deposits.tool.js';
 import { getInstitutionFinancialsTool } from '@/mcp-server/tools/definitions/get-institution-financials.tool.js';
+import { getInstitutionHistoryTool } from '@/mcp-server/tools/definitions/get-institution-history.tool.js';
 import { queryFinancialsTool } from '@/mcp-server/tools/definitions/query-financials.tool.js';
 import { searchFailuresTool } from '@/mcp-server/tools/definitions/search-failures.tool.js';
 import { searchInstitutionsTool } from '@/mcp-server/tools/definitions/search-institutions.tool.js';
@@ -32,7 +40,15 @@ import {
   initFdicService,
 } from '@/services/fdic/fdic-service.js';
 import { HARBOR_BANK } from '../../fixtures/fdic-records.js';
-import { envelope, FakeFdic, INDEX, INVALID_DATE_400 } from '../../helpers/fake-fdic.js';
+import {
+  branchHistoryRow,
+  envelope,
+  FakeFdic,
+  type FakeRequest,
+  HISTORY,
+  INDEX,
+  INVALID_DATE_400,
+} from '../../helpers/fake-fdic.js';
 import { contractRecovery, textOf, toolError } from '../../helpers/tool-results.js';
 
 /** Upstream error-body text addressed to the model, which must never reach a caller. */
@@ -357,6 +373,7 @@ describe('error mapping', () => {
       queryFinancialsTool,
       searchFailuresTool,
       getDepositsTool,
+      getInstitutionHistoryTool,
     ].map((tool) => [tool.name, tool] as const),
   ])('names the wait in %s’s rate-limit recovery, singular at one second', async (_name, tool) => {
     const fake = new FakeFdic().on(
@@ -709,5 +726,286 @@ describe('service accessor', () => {
     expect(getFdicService()).toBe(service);
     disposeFdicService();
     expect(() => getFdicService()).toThrow(/not initialized/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /history
+// ---------------------------------------------------------------------------
+
+const ALL_BUT_BRANCH = [
+  'merger',
+  'failure_or_assistance',
+  'branch_purchase',
+  'name_change',
+  'relocation',
+  'charter_change',
+  'opening',
+  'closing',
+  'other',
+] as const;
+
+/**
+ * Serves `/history` from `data` the way BankFind does: rows within the request's
+ * `EFFDATE` range (`]` inclusive, `}` exclusive), sorted by `EFFDATE` descending
+ * with ties in an order of their own, then `offset`/`limit`. A walk that sends
+ * more than `maxRequests` fails the call rather than hang the test.
+ */
+function historyIndex(data: readonly Record<string, unknown>[], maxRequests = 20) {
+  let served = 0;
+  return (request: FakeRequest) => {
+    if (++served > maxRequests) {
+      throw internalError(`history walk sent more than ${maxRequests} requests`);
+    }
+    const p = request.params;
+    const span = /EFFDATE:\[(\S+) TO (\S+?)([\]}])/.exec(p.filters ?? '');
+    const date = (row: Record<string, unknown>) => String(row.EFFDATE).slice(0, 10);
+    let matched = [...data];
+    if (span) {
+      const [, lo, hi, close] = span as unknown as [string, string, string, string];
+      matched = matched.filter(
+        (row) =>
+          (lo === '*' || date(row) >= lo) &&
+          (hi === '*' || (close === '}' ? date(row) < hi : date(row) <= hi)),
+      );
+    }
+    if (p.sort_by === 'EFFDATE') {
+      // Ties come back in reverse insertion order — no particular order, as upstream.
+      matched = matched
+        .reverse()
+        .sort((a, b) => (date(a) < date(b) ? 1 : date(a) > date(b) ? -1 : 0));
+    }
+    const offset = Number(p.offset ?? 0);
+    const page = matched.slice(offset, offset + Number(p.limit));
+    return envelope('history', page, { total: matched.length });
+  };
+}
+
+/** `count` branch rows of CERT 628 on `date`, IDs `<prefix>-0…`. */
+function onDate(date: string, count: number, prefix: string) {
+  return Array.from({ length: count }, (_, i) => branchHistoryRow(628, date, `${prefix}-${i}`));
+}
+
+describe('getInstitutionHistory', () => {
+  it('reads institution-level rows matching the CERT on any side, sorted newest first, and nothing branch-level by default', async () => {
+    const fake = new FakeFdic().on(
+      'history',
+      () => true,
+      envelope('history', [HISTORY.truistMerger, HISTORY.truistMergerSurvivor]),
+    );
+    const result = await serviceOver(fake).getInstitutionHistory(
+      { cert: 867, eventTypes: ALL_BUT_BRANCH },
+      toolCtx(),
+      callBudget(),
+    );
+    expect(fake.requests.map((r) => r.params)).toEqual([
+      {
+        filters: 'ORG_ROLE_CDE:"FI" AND (CERT:867 OR OUT_CERT:867 OR SUR_CERT:867)',
+        fields:
+          'ID,TRANSNUM,CERT,CHANGECODE,CHANGECODE_DESC,EFFDATE,SUR_CERT,SUR_INSTNAME,OUT_CERT,OUT_INSTNAME,ACQ_CERT,ACQ_INSTNAME,FRM_CERT,FRM_INSTNAME,INSTNAME,PADDR,PCITY,PSTALP,CLASS,CHARTAGENT,REGAGENT,FRM_PADDR,FRM_PCITY,FRM_PSTALP,FRM_CLASS,FRM_CHARTAGENT,FRM_REGAGENT',
+        sort_by: 'EFFDATE',
+        sort_order: 'DESC',
+        limit: '10000',
+      },
+    ]);
+    expect(result.dataAsOf).toBe(INDEX.history.createTimestamp);
+    expect(result.events.map((e) => [e.change_code, e.role])).toEqual([[223, 'outgoing']]);
+  });
+
+  it('adds a branch-level request, with an EFFDATE range when dates are given, and filters institution events by date locally', async () => {
+    const fake = new FakeFdic()
+      .on(
+        'history',
+        (p) => p.filters?.includes('"FI"') ?? false,
+        envelope('history', [HISTORY.firstRepublicFailure, HISTORY.assistedWithoutOutgoing]),
+      )
+      .on(
+        'history',
+        () => true,
+        envelope('history', [
+          { ...HISTORY.branchRelocation, CERT: 628, EFFDATE: '2023-02-01T00:00:00' },
+        ]),
+      );
+    const result = await serviceOver(fake).getInstitutionHistory(
+      {
+        cert: 628,
+        eventTypes: [...ALL_BUT_BRANCH, 'branch'],
+        from: '2023-01-01',
+        to: '2023-12-31',
+      },
+      toolCtx(),
+      callBudget(),
+    );
+    const branch = fake.requests.find((r) => r.params.filters?.includes('"BR"'));
+    expect(branch?.params).toMatchObject({
+      filters: 'CERT:628 AND ORG_ROLE_CDE:"BR" AND EFFDATE:[2023-01-01 TO 2023-12-31]',
+      fields:
+        'ID,TRANSNUM,CERT,CHANGECODE,CHANGECODE_DESC,EFFDATE,OFF_NAME,OFF_NUM,OFF_PADDR,OFF_PCITY,OFF_PSTALP,FRM_OFF_NAME,FRM_OFF_PADDR,FRM_OFF_PCITY,FRM_OFF_PSTALP',
+      sort_by: 'EFFDATE',
+      sort_order: 'DESC',
+    });
+    // Institution rows are read whole: no date range upstream, the 2008 event dropped here.
+    expect(fake.requests.find((r) => r.params.filters?.includes('"FI"'))?.params.filters).toBe(
+      'ORG_ROLE_CDE:"FI" AND (CERT:628 OR OUT_CERT:628 OR SUR_CERT:628)',
+    );
+    expect(result.events.map((e) => [e.effective_date, e.event_type])).toEqual([
+      ['2023-05-01', 'failure_or_assistance'],
+      ['2023-02-01', 'branch'],
+    ]);
+  });
+
+  it('sends only the branch-level request when branch is the only type asked for', async () => {
+    const fake = new FakeFdic().on('history', () => true, envelope('history', []));
+    const result = await serviceOver(fake).getInstitutionHistory(
+      { cert: 628, eventTypes: ['branch'] },
+      toolCtx(),
+      callBudget(),
+    );
+    expect(fake.requests.map((r) => r.params.filters)).toEqual(['CERT:628 AND ORG_ROLE_CDE:"BR"']);
+    expect(result).toEqual({ dataAsOf: INDEX.history.createTimestamp, events: [] });
+  });
+
+  it('filters by type after pairing, so a takeover the survivor recorded as an 810 merger stays a failure', async () => {
+    const survivorAsMerger = {
+      ...HISTORY.firstRepublicSurvivor,
+      ID: '2023160984_810_417_417_497251',
+      CHANGECODE: 810,
+      CHANGECODE_DESC: 'Participated in Absorbtion/Consolidation/Merger',
+    };
+    const fake = new FakeFdic().on(
+      'history',
+      () => true,
+      envelope('history', [survivorAsMerger, HISTORY.firstRepublicFailure]),
+    );
+    const service = serviceOver(fake);
+    const mergers = await service.getInstitutionHistory(
+      { cert: 628, eventTypes: ['merger'] },
+      toolCtx(),
+      callBudget(),
+    );
+    expect(mergers.events).toEqual([]);
+    const failures = await service.getInstitutionHistory(
+      { cert: 628, eventTypes: ['failure_or_assistance'] },
+      toolCtx(),
+      callBudget(),
+    );
+    expect(failures.events.map((e) => [e.change_code, e.role])).toEqual([[211, 'survivor']]);
+  });
+
+  it('walks a boundary date split across two pages by EFFDATE upper bound and returns each row once', async () => {
+    const data = [
+      ...onDate('2024-06-30', 9_000, 'new'),
+      ...onDate('2024-03-31', 2_000, 'edge'),
+      ...onDate('2023-12-31', 500, 'old'),
+    ];
+    const fake = new FakeFdic().on('history', () => true, historyIndex(data));
+    const result = await serviceOver(fake, { cacheTtlSeconds: 0 }).getInstitutionHistory(
+      { cert: 628, eventTypes: ['branch'] },
+      toolCtx(),
+      callBudget(),
+    );
+    expect(fake.requests.map((r) => r.params.filters)).toEqual([
+      'CERT:628 AND ORG_ROLE_CDE:"BR"',
+      'CERT:628 AND ORG_ROLE_CDE:"BR" AND EFFDATE:[* TO 2024-03-31]',
+    ]);
+    expect(result.events).toHaveLength(11_500);
+    expect(new Set(result.events.map((e) => e.branch?.name)).size).toBe(11_500);
+    expect(result.events.at(0)?.effective_date).toBe('2024-06-30');
+    expect(result.events.at(-1)?.effective_date).toBe('2023-12-31');
+  });
+
+  it('keeps the caller’s to_date as the first upper bound and from_date on every page', async () => {
+    const data = [...onDate('2024-06-30', 9_000, 'a'), ...onDate('2024-01-31', 2_000, 'b')];
+    const fake = new FakeFdic().on('history', () => true, historyIndex(data));
+    await serviceOver(fake, { cacheTtlSeconds: 0 }).getInstitutionHistory(
+      { cert: 628, eventTypes: ['branch'], from: '2024-01-01', to: '2024-12-31' },
+      toolCtx(),
+      callBudget(),
+    );
+    expect(fake.requests.map((r) => r.params.filters)).toEqual([
+      'CERT:628 AND ORG_ROLE_CDE:"BR" AND EFFDATE:[2024-01-01 TO 2024-12-31]',
+      'CERT:628 AND ORG_ROLE_CDE:"BR" AND EFFDATE:[2024-01-01 TO 2024-01-31]',
+    ]);
+  });
+
+  it('ends when a full page holds one date: reads that date by offset, then continues strictly below it', async () => {
+    const data = [
+      ...onDate('2024-06-30', 50, 'top'),
+      ...onDate('2024-03-31', 25_000, 'flood'),
+      ...onDate('2023-12-31', 300, 'old'),
+    ];
+    const fake = new FakeFdic().on('history', () => true, historyIndex(data));
+    const result = await serviceOver(fake, { cacheTtlSeconds: 0 }).getInstitutionHistory(
+      { cert: 628, eventTypes: ['branch'] },
+      toolCtx(),
+      callBudget(),
+    );
+    const day = 'CERT:628 AND ORG_ROLE_CDE:"BR" AND EFFDATE:[2024-03-31 TO 2024-03-31]';
+    expect(fake.requests.map((r) => [r.params.filters, r.params.sort_by, r.params.offset])).toEqual(
+      [
+        ['CERT:628 AND ORG_ROLE_CDE:"BR"', 'EFFDATE', undefined],
+        ['CERT:628 AND ORG_ROLE_CDE:"BR" AND EFFDATE:[* TO 2024-03-31]', 'EFFDATE', undefined],
+        [day, 'TRANSNUM', '0'],
+        [day, 'TRANSNUM', '10000'],
+        [day, 'TRANSNUM', '20000'],
+        ['CERT:628 AND ORG_ROLE_CDE:"BR" AND EFFDATE:[* TO 2024-03-31}', 'EFFDATE', undefined],
+      ],
+    );
+    expect(result.events).toHaveLength(25_350);
+    expect(new Set(result.events.map((e) => e.branch?.name)).size).toBe(25_350);
+  });
+
+  it('runs every page under the one deadline the call started with', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-28T12:00:00Z'));
+    const data = [
+      ...onDate('2024-06-30', 9_999, 'a'),
+      ...onDate('2024-03-31', 9_999, 'b'),
+      ...onDate('2023-12-31', 10, 'c'),
+    ];
+    const index = historyIndex(data);
+    const fake = new FakeFdic().on(
+      'history',
+      () => true,
+      (request) => {
+        vi.setSystemTime(Date.now() + 20_000);
+        return index(request);
+      },
+    );
+    const timeouts: number[] = [];
+    const service = new FdicService({
+      getJson: (url, opts) => {
+        timeouts.push(opts.timeoutMs);
+        return fake.getJson(url, opts);
+      },
+      pacer: createPacer({ name: 'fdic-test' }),
+      cacheTtlSeconds: 0,
+    });
+    await service.getInstitutionHistory(
+      { cert: 628, eventTypes: ['branch'] },
+      toolCtx(),
+      callBudget(55_000),
+    );
+    // 30 s per request at most; after 20 s and 40 s of the 55 s budget, what is left.
+    expect(timeouts).toEqual([30_000, 30_000, 15_000]);
+  });
+
+  it('fails the call on a row without its ID, effective date, change code, or label', async () => {
+    const fake = new FakeFdic().on(
+      'history',
+      () => true,
+      envelope('history', [{ ...HISTORY.truistMerger, EFFDATE: null }]),
+    );
+    const error = await caught(
+      serviceOver(fake).getInstitutionHistory(
+        { cert: 867, eventTypes: ALL_BUT_BRANCH },
+        toolCtx(),
+        callBudget(),
+      ),
+    );
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.message).toBe(
+      'FDIC returned a history row without its ID, effective date, change code, or change description.',
+    );
   });
 });

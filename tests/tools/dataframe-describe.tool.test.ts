@@ -24,7 +24,13 @@ import {
   initCanvasBridge,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { createDuckdbCanvas, tenantSession } from '../helpers/canvas.js';
-import { contractRecovery, structured, textOf, toolError } from '../helpers/tool-results.js';
+import {
+  contractRecovery,
+  readMarkdownText,
+  structured,
+  textOf,
+  toolError,
+} from '../helpers/tool-results.js';
 
 type Output = z.infer<typeof dataframeDescribeTool.output> & { notice?: string };
 type Input = z.input<typeof dataframeDescribeTool.input>;
@@ -87,17 +93,17 @@ async function stagedSession() {
 }
 
 describe('fdic_dataframe_describe', () => {
-  it('fails canvas_unavailable with its contract recovery when the canvas is off', async () => {
+  it('fails canvas_unavailable pointing at offset pages first when the canvas is off', async () => {
     initCanvasBridge(undefined);
     const { result, text } = await run({});
+    const hint =
+      'Dataframes are off in this deployment; page fdic_query_financials and fdic_get_deposits with offset and next_offset instead. A self-hosted server turns them on with CANVAS_PROVIDER_TYPE=duckdb.';
     expect(toolError(result)).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
-      data: {
-        reason: 'canvas_unavailable',
-        recovery: { hint: contractRecovery(tool, 'canvas_unavailable') },
-      },
+      data: { reason: 'canvas_unavailable', recovery: { hint } },
     });
     expect(text).toContain('reason canvas_unavailable');
+    expect(readMarkdownText(text).split('\n')).toContain(`Recovery: ${hint}`);
   });
 
   it('validates the empty listing with its notice on both surfaces', async () => {
@@ -458,7 +464,7 @@ describe('fdic_dataframe_describe with listing off', () => {
       },
     });
     expect(text).toContain('reason listing_unavailable');
-    expect(text).toContain(contractRecovery(tool, 'listing_unavailable'));
+    expect(readMarkdownText(text)).toContain(contractRecovery(tool, 'listing_unavailable'));
   });
 
   it('still describes a dataframe by name, and queries it, on both surfaces', async () => {

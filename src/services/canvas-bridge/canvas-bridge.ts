@@ -1,6 +1,7 @@
 /**
  * @fileoverview Adapter between the fdic_ tools and the framework DataCanvas: one
- * shared canvas per tenant, `df_XXXXX_XXXXX` table names, per-table TTL, and
+ * shared canvas per tenant (minted once however many first calls arrive
+ * together), `df_XXXXX_XXXXX` table names, per-table TTL, and
  * provenance (source tool, parameters, column schema and units) kept in
  * `ctx.state` and swept lazily on every operation. A staging budget caps the
  * rows a tenant's live dataframes hold, evicting the oldest first, and the
@@ -144,6 +145,11 @@ export class CanvasBridge {
   /** Whether describe may enumerate the live dataframes. */
   readonly listing: boolean;
   private readonly maxStagedRows: number;
+  /**
+   * Per tenant, the canvas resolution queued last. It settles, never rejects,
+   * and removes itself once it settles while still the last one queued.
+   */
+  private readonly resolutions = new Map<string | undefined, Promise<void>>();
 
   constructor(
     private readonly canvas: DataCanvas,
@@ -161,7 +167,7 @@ export class CanvasBridge {
    */
   async stage(ctx: Context, options: StageOptions): Promise<StagedDataset | undefined> {
     try {
-      const instance = (await this.sweepExpired(ctx)) ?? (await this.createSharedCanvas(ctx));
+      const instance = await this.sweepExpired(ctx, true);
       const tableName = mintTableName();
       const ttlMs = getServerConfig().datasetTtlSeconds * 1000;
       const result = await instance.registerTable(tableName, options.rows, {
@@ -192,7 +198,7 @@ export class CanvasBridge {
       return { name: result.tableName, row_count: result.rowCount, expires_at: meta.expiresAt };
     } catch (err) {
       if (ctx.signal.aborted) throw err;
-      ctx.log.warning('Dataframe staging failed; the inline preview stands', {
+      ctx.log.warning('Dataframe staging failed; the inline page stands', {
         sourceTool: options.sourceTool,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -205,7 +211,7 @@ export class CanvasBridge {
    * is set. A caller checks `listing` before asking without a name.
    */
   async describe(ctx: Context, name?: string): Promise<DataframeMeta[]> {
-    await this.sweepExpired(ctx);
+    await this.sweepExpired(ctx, false);
     if (name) {
       const meta = await ctx.state.get<DataframeMeta>(`${META_PREFIX}${name}`);
       return meta ? [meta] : [];
@@ -228,7 +234,7 @@ export class CanvasBridge {
     sql: string,
     options: BridgeQueryOptions,
   ): Promise<{ meta?: DataframeMeta; result: QueryResult }> {
-    const live = await this.sweepExpired(ctx);
+    const instance = await this.sweepExpired(ctx, true);
     const { registerAs } = options;
     if (registerAs && (await ctx.state.get(`${META_PREFIX}${registerAs}`)) !== null) {
       throw validationError(
@@ -236,7 +242,6 @@ export class CanvasBridge {
         { reason: 'register_as_clash', tableName: registerAs },
       );
     }
-    const instance = live ?? (await this.createSharedCanvas(ctx));
     const ttlMs = getServerConfig().datasetTtlSeconds * 1000;
     let result: QueryResult;
     try {
@@ -284,7 +289,7 @@ export class CanvasBridge {
 
   /** Drops a dataframe and its provenance. True when either existed. */
   async drop(ctx: Context, name: string): Promise<boolean> {
-    const live = await this.sweepExpired(ctx);
+    const live = await this.sweepExpired(ctx, false);
     const key = `${META_PREFIX}${name}`;
     const hadMeta = (await ctx.state.get(key)) !== null;
     await ctx.state.delete(key);
@@ -328,10 +333,13 @@ export class CanvasBridge {
   /**
    * Runs before every operation: forgets the provenance of an expired canvas,
    * drops each table whose own TTL has passed along with its provenance, and
-   * returns the tenant's live canvas, if it has one.
+   * returns the tenant's live canvas — minting one when `create` is set and none
+   * lives. Describe and drop never create.
    */
-  private async sweepExpired(ctx: Context): Promise<CanvasInstance | undefined> {
-    const instance = await this.liveCanvas(ctx);
+  private async sweepExpired(ctx: Context, create: true): Promise<CanvasInstance>;
+  private async sweepExpired(ctx: Context, create: false): Promise<CanvasInstance | undefined>;
+  private async sweepExpired(ctx: Context, create: boolean): Promise<CanvasInstance | undefined> {
+    const instance = await this.tenantCanvas(ctx, create);
     const now = new Date().toISOString();
     for await (const { key, meta } of this.iterateMeta(ctx)) {
       if (meta.expiresAt > now) continue;
@@ -363,28 +371,77 @@ export class CanvasBridge {
   }
 
   /**
-   * The tenant's stored canvas while it lives. A canvas that expired took every
-   * table with it, so its ID and all provenance go too, and none is returned.
+   * The tenant's canvas, minted when `create` is set and none lives. A live
+   * stored ID needs no coordination. Otherwise — no canvas yet, or one that
+   * expired — the call queues behind the tenant's pending resolution and then
+   * resolves for itself, so concurrent first calls land on one canvas and an
+   * expired canvas's records are purged only by a call that has just read them
+   * dead.
    */
-  private async liveCanvas(ctx: Context): Promise<CanvasInstance | undefined> {
+  private async tenantCanvas(ctx: Context, create: boolean): Promise<CanvasInstance | undefined> {
     const stored = await ctx.state.get<string>(CANVAS_ID_KEY);
-    if (!stored) return;
-    try {
-      return await this.canvas.acquire(stored, ctx);
-    } catch (err) {
-      if (reasonOf(err) !== 'canvas_not_found') throw err;
-    }
-    const keys = [CANVAS_ID_KEY];
-    for await (const { key } of this.iterateMeta(ctx)) keys.push(key);
-    await ctx.state.deleteMany(keys);
-    return;
+    if (stored) {
+      const live = await this.acquireLive(stored, ctx);
+      if (live) return live;
+    } else if (!create) return;
+    return await this.queued(ctx.tenantId, () => this.resolveCanvas(ctx, create));
   }
 
-  /** A fresh shared canvas for the tenant, its ID stored for later calls. */
-  private async createSharedCanvas(ctx: Context): Promise<CanvasInstance> {
-    const instance = await this.canvas.acquire(undefined, ctx);
-    await ctx.state.set(CANVAS_ID_KEY, instance.canvasId);
+  /** The canvas `id` names while it lives; `undefined` once it has expired. */
+  private async acquireLive(id: string, ctx: Context): Promise<CanvasInstance | undefined> {
+    try {
+      return await this.canvas.acquire(id, ctx, { signal: ctx.signal });
+    } catch (err) {
+      if (reasonOf(err) !== 'canvas_not_found') throw err;
+      return;
+    }
+  }
+
+  /**
+   * Re-reads the stored canvas under the tenant's queue. A canvas that expired
+   * took every table with it, so its ID and all provenance go too; then, when
+   * `create` is set, a new canvas is minted and its ID stored, and a mint whose
+   * ID cannot be stored is dropped rather than left holding a slot.
+   */
+  private async resolveCanvas(ctx: Context, create: boolean): Promise<CanvasInstance | undefined> {
+    const stored = await ctx.state.get<string>(CANVAS_ID_KEY);
+    if (stored) {
+      const live = await this.acquireLive(stored, ctx);
+      if (live) return live;
+      const keys = [CANVAS_ID_KEY];
+      for await (const { key } of this.iterateMeta(ctx)) keys.push(key);
+      await ctx.state.deleteMany(keys);
+    }
+    if (!create) return;
+    const instance = await this.canvas.acquire(undefined, ctx, { signal: ctx.signal });
+    try {
+      await ctx.state.set(CANVAS_ID_KEY, instance.canvasId);
+    } catch (err) {
+      await this.canvas.drop(instance.canvasId, ctx);
+      throw err;
+    }
     return instance;
+  }
+
+  /**
+   * Runs `resolve` once the tenant's earlier resolutions have settled. Each call
+   * runs its own `resolve` under its own `ctx` and never takes another call's
+   * result: `ctx.state` rejects once its own request is cancelled, so a shared
+   * result would fail every waiter when the call producing it was cancelled.
+   */
+  private async queued<T>(tenantId: string | undefined, resolve: () => Promise<T>): Promise<T> {
+    const prior = this.resolutions.get(tenantId);
+    const run = prior ? prior.then(resolve) : resolve();
+    const settled: Promise<void> = run
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        if (this.resolutions.get(tenantId) === settled) this.resolutions.delete(tenantId);
+      });
+    this.resolutions.set(tenantId, settled);
+    return await run;
   }
 }
 
@@ -398,8 +455,8 @@ let _bridge: CanvasBridge | undefined;
 
 /**
  * Installs the bridge in `setup()`. `canvas` is `undefined` when the framework
- * built no DataCanvas (`CANVAS_PROVIDER_TYPE=none`); producers then keep their
- * inline preview and the dataframe tools report `canvas_unavailable`.
+ * built no DataCanvas (`CANVAS_PROVIDER_TYPE=none`); producers then return their
+ * rows a page at a time and the dataframe tools report `canvas_unavailable`.
  */
 export function initCanvasBridge(
   canvas: DataCanvas | undefined,

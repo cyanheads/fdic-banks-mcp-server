@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "fdic-banks-mcp-server",
   "version": "0.2.0",
-  "description": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share.",
+  "description": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, mergers, deposit share.",
   "author": { "name": "cyanheads" },
   "homepage": "https://github.com/cyanheads/fdic-banks-mcp-server#readme",
   "repository": { "type": "git", "url": "https://github.com/cyanheads/fdic-banks-mcp-server" },
@@ -17,11 +17,10 @@
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
+        "CANVAS_PROVIDER_TYPE": "none",
         "FDIC_RATE_LIMIT_RPS": "${user_config.FDIC_RATE_LIMIT_RPS}",
         "FDIC_CACHE_TTL_SECONDS": "${user_config.FDIC_CACHE_TTL_SECONDS}",
-        "FDIC_PANEL_MAX_ROWS": "${user_config.FDIC_PANEL_MAX_ROWS}",
-        "FDIC_DATASET_TTL_SECONDS": "${user_config.FDIC_DATASET_TTL_SECONDS}",
-        "FDIC_DATAFRAME_DROP_ENABLED": "${user_config.FDIC_DATAFRAME_DROP_ENABLED}"
+        "FDIC_PANEL_MAX_ROWS": "${user_config.FDIC_PANEL_MAX_ROWS}"
       }
     }
   },
@@ -56,21 +55,6 @@
       "default": 50000,
       "min": 1000,
       "max": 200000
-    },
-    "FDIC_DATASET_TTL_SECONDS": {
-      "title": "Staged dataframe TTL (seconds)",
-      "description": "Per-table TTL for staged dataframes (minimum 60).",
-      "type": "number",
-      "required": false,
-      "default": 86400,
-      "min": 60
-    },
-    "FDIC_DATAFRAME_DROP_ENABLED": {
-      "title": "Enable fdic_dataframe_drop",
-      "description": "Expose the tool that drops a staged dataframe before its TTL.",
-      "type": "boolean",
-      "required": false,
-      "default": false
     }
   }
 }

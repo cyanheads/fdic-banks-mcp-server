@@ -15,6 +15,15 @@ export function textOf(result: ToolResult): string {
   return result.content.map((block) => (block.type === 'text' ? block.text : '')).join('');
 }
 
+/**
+ * Markdown text as a CommonMark reader shows it: each backslash escape of ASCII
+ * punctuation (CommonMark §2.4) reads as the bare character. Error and trailer
+ * text in `content[]` is escaped, so compare plain prose against this form.
+ */
+export function readMarkdownText(text: string): string {
+  return text.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+}
+
 /** `structuredContent` of a successful call, typed by the caller. */
 export function structured<T = Record<string, unknown>>(result: ToolResult): T {
   if (result.isError) {

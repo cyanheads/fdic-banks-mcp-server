@@ -28,7 +28,7 @@ const contracts = buildToolDefinitions({ dropEnabled: true }).flatMap((definitio
 
 describe('declared error severity', () => {
   it('covers every tool that declares a contract', () => {
-    expect(new Set(contracts.map(([tool]) => tool)).size).toBe(9);
+    expect(new Set(contracts.map(([tool]) => tool)).size).toBe(10);
   });
 
   it.each(contracts)(

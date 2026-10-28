@@ -437,12 +437,36 @@ describe('both surfaces through the production contract', () => {
       '| total_assets | ASSET | usd_thousands | point_in_time | 2,456,123 | 3,000,000 | 1,500,000 | 5,000,000 | 1,200,000 | 9,000,000 | 40 | 4 of 6 | 5 |',
     );
     expect(text).toContain(
-      '| roa | ROAQ | percent | quarter_annualized | 1.25% | 1.25% | 0.88% | 1.63% | 0.5% | 2% | 50 | 3 of 5 | 4 |',
+      '| roa | ROAQ | percent | quarter_annualized | 1.25% | 1.25% | 0.875% | 1.625% | 0.5% | 2% | 50 | 3 of 5 | 4 |',
     );
     expect(text).toContain(
       '| cet1_ratio | IDT1CER | percent | point_in_time | — | 12.5% | 11.75% | 13.25% | 11% | 14% | — | — | 4 |',
     );
     expect(text).toContain('> Fewer than five peers reported roa, cet1_ratio');
+  });
+
+  it('renders interpolated count statistics and the percentile with every digit structuredContent carries', async () => {
+    withLatest();
+    withOwnRow({ ...OWN_ROW, OFFDOM: 3 });
+    withPeers(
+      [1, 2, 4, 5, 16, 32].map((offices, i) => ({
+        OFFDOM: offices,
+        CERT: 2001 + i,
+        ID: `${2001 + i}_20260630`,
+      })),
+    );
+    const { result, text } = await run({ cert: CERT, metrics: ['domestic_offices'] });
+    expect(structured<Output>(result).comparisons[0]).toMatchObject({
+      unit: 'count',
+      value: 3,
+      peer_median: 4.5,
+      peer_p25: 2.5,
+      peer_p75: 13.25,
+      percentile: 33.333333333333336,
+    });
+    expect(text.split('\n')).toContain(
+      '| domestic_offices | OFFDOM | count | point_in_time | 3 | 4.5 | 2.5 | 13.25 | 1 | 32 | 33.333333333333336 | 5 of 7 | 6 |',
+    );
   });
 
   it('renders the state, explicit list, and missing peers', async () => {

@@ -42,7 +42,7 @@ export const dataframeDropTool = tool('fdic_dataframe_drop', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'DataCanvas is not configured in this deployment',
       recovery:
-        'Dataframes are off in this deployment, so nothing is staged to drop; ask the operator to set CANVAS_PROVIDER_TYPE=duckdb to turn them on.',
+        'Dataframes are off in this deployment, so nothing is staged to drop; fdic_query_financials and fdic_get_deposits return every row through offset and next_offset pages. A self-hosted server turns dataframes on with CANVAS_PROVIDER_TYPE=duckdb.',
       severity: 'notice',
     },
     {

@@ -2,8 +2,9 @@
  * @fileoverview Fake FDIC BankFind transport for tests. Implements the service's
  * `getJson` seam as a route table that records every URL it receives, plus
  * builders for the BankFind response envelope in its recorded shapes (row hits,
- * aggregation buckets, the 400 error body) across all four endpoints, and the
- * quarter matcher that panel page responders serve single quarters and ranges by.
+ * aggregation buckets, the 400 error body) across all five endpoints, recorded
+ * `/history` rows, and the quarter matcher that panel page responders serve
+ * single quarters and ranges by.
  * @module tests/helpers/fake-fdic
  */
 
@@ -11,7 +12,7 @@ import { internalError } from '@cyanheads/mcp-ts-core/errors';
 import { createPacer, type Pacer } from '@cyanheads/mcp-ts-core/utils';
 import { FdicService, type GetJson, initFdicService } from '@/services/fdic/fdic-service.js';
 
-export type FdicEndpoint = 'institutions' | 'financials' | 'failures' | 'sod';
+export type FdicEndpoint = 'institutions' | 'financials' | 'failures' | 'sod' | 'history';
 
 /** One request the fake received, with its query parameters decoded. */
 export interface FakeRequest {
@@ -93,6 +94,7 @@ export const INDEX = {
   financials: { name: 'risview_20260818170421', createTimestamp: '2026-08-18T17:04:23Z' },
   failures: { name: 'failures_1787580000000', createTimestamp: '2026-08-24T13:20:00Z' },
   sod: { name: 'sod_20260918102231', createTimestamp: '2026-09-18T10:22:35Z' },
+  history: { name: 'history_20261023090007', createTimestamp: '2026-10-23T10:19:46Z' },
 } as const;
 
 /** A search hit carrying a `highlight` block, as `/institutions` name searches return. */
@@ -208,6 +210,330 @@ export function requestedQuarters(filters: string | undefined, keys: readonly st
     )
     .sort()
     .reverse();
+}
+
+// ---------------------------------------------------------------------------
+// /history rows (recorded from the live index, history_20261023090007)
+// ---------------------------------------------------------------------------
+
+/**
+ * Institution-level `/history` rows. Each exit is recorded twice: an
+ * outgoing-side row (211–225; `CERT` is the outgoing bank, or absent on 211 and
+ * 224) and a survivor-side row (810–812; `CERT` is the survivor). Unpaired rows
+ * are exits FDIC recorded on one side only.
+ */
+export const HISTORY = {
+  /** SunTrust (867) merged into Truist (9846): the outgoing side. */
+  truistMerger: {
+    ID: '201911532_223_550_6300_550',
+    TRANSNUM: 201911532,
+    CERT: 867,
+    CHANGECODE: 223,
+    CHANGECODE_DESC: 'Merger -Without Assistance',
+    EFFDATE: '2019-12-07T00:00:00',
+    OUT_CERT: 867,
+    OUT_INSTNAME: 'SunTrust Bank',
+    SUR_CERT: 9846,
+    SUR_INSTNAME: 'Truist Bank',
+    ACQ_CERT: 9846,
+    ACQ_INSTNAME: 'Branch Banking and Trust Company',
+    PSTALP: 'NC',
+    CLASS: 'NM',
+    REGAGENT: 'FDIC',
+    FRM_PSTALP: 'GA',
+    FRM_CLASS: 'SM',
+    FRM_REGAGENT: 'FED',
+  },
+  /** The same merger from Truist's side; its FRM_ fields describe SunTrust. */
+  truistMergerSurvivor: {
+    ID: '201911532_810_6300_6300_550',
+    TRANSNUM: 201911532,
+    CERT: 9846,
+    CHANGECODE: 810,
+    CHANGECODE_DESC: 'Participated in Absorbtion/Consolidation/Merger',
+    EFFDATE: '2019-12-07T00:00:00',
+    OUT_CERT: 867,
+    OUT_INSTNAME: 'SunTrust Bank',
+    SUR_CERT: 9846,
+    SUR_INSTNAME: 'Truist Bank',
+    ACQ_CERT: 9846,
+    ACQ_INSTNAME: 'Branch Banking and Trust Company',
+    PSTALP: 'NC',
+    CLASS: 'NM',
+    REGAGENT: 'FDIC',
+    FRM_PSTALP: 'GA',
+    FRM_CLASS: 'SM',
+    FRM_REGAGENT: 'FED',
+  },
+  /** BB&T renamed Truist the same day; one transaction with the merger. */
+  truistRename: {
+    ID: '201911532_510_6300__',
+    TRANSNUM: 201911532,
+    CERT: 9846,
+    CHANGECODE: 510,
+    CHANGECODE_DESC: 'Change in Legal Name (FO or BR)',
+    EFFDATE: '2019-12-07T00:00:00',
+    INSTNAME: 'Truist Bank',
+    FRM_INSTNAME: 'Branch Banking and Trust Company',
+    FRM_CERT: 9846,
+    PADDR: '214 N Tryon St',
+    FRM_PADDR: '200 W 2nd St',
+    PCITY: 'Charlotte',
+    FRM_PCITY: 'Winston Salem',
+    PSTALP: 'NC',
+    FRM_PSTALP: 'NC',
+    CLASS: 'NM',
+    FRM_CLASS: 'NM',
+    CHARTAGENT: 'STATE',
+    FRM_CHARTAGENT: 'STATE',
+    REGAGENT: 'FDIC',
+    FRM_REGAGENT: 'FDIC',
+  },
+  /** Silicon Valley Bank (24735) failed: no CERT on the outgoing row. */
+  svbFailure: {
+    ID: '2023009929_211_17167_655043_17167',
+    TRANSNUM: 2023009929,
+    CHANGECODE: 211,
+    CHANGECODE_DESC: 'Failure - Whole Institution',
+    EFFDATE: '2023-03-10T00:00:00',
+    OUT_CERT: 24735,
+    OUT_INSTNAME: 'Silicon Valley Bank',
+    SUR_CERT: 59331,
+    SUR_INSTNAME: 'Deposit Insurance National Bank of Santa Clara',
+    ACQ_CERT: 59331,
+    ACQ_INSTNAME: 'Deposit Insurance National Bank of Santa Clara',
+    PSTALP: 'CA',
+    CLASS: 'N',
+    REGAGENT: 'OCC',
+    FRM_PSTALP: 'CA',
+    FRM_CLASS: 'SM',
+    FRM_REGAGENT: 'FED',
+  },
+  /** The bridge bank's side of the SVB failure. */
+  svbFailureSurvivor: {
+    ID: '2023009929_811_655043_655043_17167',
+    TRANSNUM: 2023009929,
+    CERT: 59331,
+    CHANGECODE: 811,
+    CHANGECODE_DESC: 'Participated in FDIC Assisted Merger',
+    EFFDATE: '2023-03-10T00:00:00',
+    OUT_CERT: 24735,
+    OUT_INSTNAME: 'Silicon Valley Bank',
+    SUR_CERT: 59331,
+    SUR_INSTNAME: 'Deposit Insurance National Bank of Santa Clara',
+    ACQ_CERT: 59331,
+    ACQ_INSTNAME: 'Deposit Insurance National Bank of Santa Clara',
+  },
+  /** SVB's own relocation: a subject row whose address changed. */
+  svbRelocation: {
+    ID: '960011282_520_17167__',
+    TRANSNUM: 960011282,
+    CERT: 24735,
+    CHANGECODE: 520,
+    CHANGECODE_DESC: 'Change in Physical Location (FO or BR)',
+    EFFDATE: '1995-08-04T00:00:00',
+    INSTNAME: 'Silicon Valley Bank',
+    FRM_INSTNAME: 'Silicon Valley Bank',
+    FRM_CERT: 24735,
+    PADDR: '3003 Tasman Drive',
+    FRM_PADDR: '3000 Lakeside Drive',
+    PCITY: 'Santa Clara',
+    FRM_PCITY: 'Santa Clara',
+    PSTALP: 'CA',
+    FRM_PSTALP: 'CA',
+    CLASS: 'SM',
+    FRM_CLASS: 'SM',
+    CHARTAGENT: 'STATE',
+    FRM_CHARTAGENT: 'STATE',
+    REGAGENT: 'FED',
+    FRM_REGAGENT: 'FED',
+  },
+  /** First Republic (59017) failed into JPMorgan Chase (628): the outgoing side. */
+  firstRepublicFailure: {
+    ID: '2023160984_211_497251_417_497251',
+    TRANSNUM: 2023160984,
+    CHANGECODE: 211,
+    CHANGECODE_DESC: 'Failure - Whole Institution',
+    EFFDATE: '2023-05-01T00:00:00',
+    OUT_CERT: 59017,
+    OUT_INSTNAME: 'First Republic Bank',
+    SUR_CERT: 628,
+    SUR_INSTNAME: 'JPMorgan Chase Bank, National Association',
+    ACQ_CERT: 628,
+    ACQ_INSTNAME: 'JPMorgan Chase Bank, National Association',
+  },
+  /** JPMorgan Chase's side of the First Republic takeover. */
+  firstRepublicSurvivor: {
+    ID: '2023160984_811_417_417_497251',
+    TRANSNUM: 2023160984,
+    CERT: 628,
+    CHANGECODE: 811,
+    CHANGECODE_DESC: 'Participated in FDIC Assisted Merger',
+    EFFDATE: '2023-05-01T00:00:00',
+    OUT_CERT: 59017,
+    OUT_INSTNAME: 'First Republic Bank',
+    SUR_CERT: 628,
+    SUR_INSTNAME: 'JPMorgan Chase Bank, National Association',
+    ACQ_CERT: 628,
+    ACQ_INSTNAME: 'JPMorgan Chase Bank, National Association',
+  },
+  /** JPMorgan Chase's 2008 assisted merger, recorded without an outgoing CERT. */
+  assistedWithoutOutgoing: {
+    ID: '200812274_811_417_417_45467',
+    TRANSNUM: 200812274,
+    CERT: 628,
+    CHANGECODE: 811,
+    CHANGECODE_DESC: 'Participated in FDIC Assisted Merger',
+    EFFDATE: '2008-09-25T00:00:00',
+    SUR_CERT: 628,
+    SUR_INSTNAME: 'JPMorgan Chase Bank, National Association',
+    ACQ_CERT: 628,
+    ACQ_INSTNAME: 'JPMorgan Chase Bank, National Association',
+  },
+  /** An affiliated merger (224) into Bank of America (3510): no CERT on the outgoing row. */
+  affiliatedMerger: {
+    ID: '202003220_224_434076_2238_434076',
+    TRANSNUM: 202003220,
+    CHANGECODE: 224,
+    CHANGECODE_DESC: 'Affiliated Institution Merger (Pooling) (i.e. Corporate Reorganization',
+    EFFDATE: '2020-03-31T00:00:00',
+    OUT_CERT: 58026,
+    OUT_INSTNAME: 'Recontrust Company, National Association',
+    SUR_CERT: 3510,
+    SUR_INSTNAME: 'Bank of America, National Association',
+    ACQ_CERT: 3510,
+    ACQ_INSTNAME: 'Bank of America, National Association',
+  },
+  /** Bank of America's side of the affiliated merger. */
+  affiliatedMergerSurvivor: {
+    ID: '202003220_810_2238_2238_434076',
+    TRANSNUM: 202003220,
+    CERT: 3510,
+    CHANGECODE: 810,
+    CHANGECODE_DESC: 'Participated in Absorbtion/Consolidation/Merger',
+    EFFDATE: '2020-03-31T00:00:00',
+    OUT_CERT: 58026,
+    OUT_INSTNAME: 'Recontrust Company, National Association',
+    SUR_CERT: 3510,
+    SUR_INSTNAME: 'Bank of America, National Association',
+    ACQ_CERT: 3510,
+    ACQ_INSTNAME: 'Bank of America, National Association',
+  },
+  /** 4827's exit, recorded only on the survivor's (4857) side. */
+  survivorSideOnly: {
+    ID: '730000137_810_3235_3235_3219',
+    TRANSNUM: 730000137,
+    CERT: 4857,
+    CHANGECODE: 810,
+    CHANGECODE_DESC: 'Participated in Absorbtion/Consolidation/Merger',
+    EFFDATE: '1970-01-02T00:00:00',
+    OUT_CERT: 4827,
+    OUT_INSTNAME: 'The First National Bank of Barton',
+    SUR_CERT: 4857,
+    SUR_INSTNAME: 'The First National Bank of Oakland',
+    ACQ_CERT: 4857,
+    ACQ_INSTNAME: 'The First National Bank of Oakland',
+  },
+  /** 19442's merger into 19700, outgoing side; FDIC's 810 twin carries no `OUT_CERT`. */
+  outgoingSideOnly: {
+    ID: '910005375_223_13243_13499_13243',
+    TRANSNUM: 910005375,
+    CERT: 19442,
+    CHANGECODE: 223,
+    CHANGECODE_DESC: 'Merger -Without Assistance',
+    EFFDATE: '1991-05-08T00:00:00',
+    OUT_CERT: 19442,
+    OUT_INSTNAME: 'Island State Bank',
+    SUR_CERT: 19700,
+    SUR_INSTNAME: 'The International Bank',
+    ACQ_CERT: 19700,
+    ACQ_INSTNAME: 'The International Bank',
+  },
+  /** SunTrust (867) bought branches of Omni National Bank. */
+  branchPurchase: {
+    ID: '201020269_712_550_550_15454',
+    TRANSNUM: 201020269,
+    CERT: 867,
+    CHANGECODE: 712,
+    CHANGECODE_DESC: 'Branch Purchased',
+    EFFDATE: '2009-03-27T00:00:00',
+    OUT_CERT: 22238,
+    OUT_INSTNAME: 'Omni National Bank',
+    ACQ_CERT: 867,
+    ACQ_INSTNAME: 'SunTrust Bank',
+    PSTALP: 'GA',
+    CLASS: 'SM',
+    REGAGENT: 'FED',
+    FRM_PSTALP: 'GA',
+    FRM_CLASS: 'N',
+    FRM_REGAGENT: 'OCC',
+  },
+  /** FloridaFirst Bank (28838) bought branches of SunTrust (867). */
+  branchSale: {
+    ID: '200209235_712_41672_41672_550',
+    TRANSNUM: 200209235,
+    CERT: 28838,
+    CHANGECODE: 712,
+    CHANGECODE_DESC: 'Branch Purchased',
+    EFFDATE: '2002-02-16T00:00:00',
+    OUT_CERT: 867,
+    OUT_INSTNAME: 'SunTrust Bank',
+    ACQ_CERT: 28838,
+    ACQ_INSTNAME: 'FloridaFirst Bank',
+  },
+  /** A certificate replaced by administrative order: 90054 became 20442. */
+  certReplaced: {
+    ID: '1971-06-17T00:00:00_150_14093__',
+    TRANSNUM: 0,
+    CERT: 20442,
+    CHANGECODE: 150,
+    CHANGECODE_DESC: 'Cert Changed from Old Cert by Administrative Order',
+    EFFDATE: '1971-06-17T00:00:00',
+    FRM_CERT: 90054,
+    FRM_INSTNAME: 'Meriden Trust & Safe Deposit Company',
+    INSTNAME: 'The Meriden Trust and Safe Deposit Company',
+    PCITY: 'Meriden',
+    FRM_PCITY: 'Meriden',
+    PSTALP: 'CT',
+    FRM_PSTALP: 'CT',
+    CLASS: 'NM',
+    FRM_CLASS: 'NC',
+    CHARTAGENT: 'STATE',
+    FRM_CHARTAGENT: 'STATE',
+    REGAGENT: 'FDIC',
+    FRM_REGAGENT: 'STATE',
+  },
+  /** A branch relocation of Wells Fargo (3511): the office's street address moved. */
+  branchRelocation: {
+    ID: '0a93314a4edc21c042f81965028a6af6',
+    TRANSNUM: 2026028320,
+    CERT: 3511,
+    CHANGECODE: 520,
+    CHANGECODE_DESC: 'Change in Physical Location (FO or BR)',
+    EFFDATE: '2026-09-28T00:00:00',
+    OFF_NAME: 'EAST FLAGLER STREET BRANCH',
+    OFF_NUM: 7442,
+    OFF_PADDR: '550 NW 1ST AVE',
+    OFF_PCITY: 'MIAMI',
+    OFF_PSTALP: 'FL',
+    FRM_OFF_NAME: 'EAST FLAGLER STREET BRANCH',
+    FRM_OFF_PADDR: '100 E FLAGLER ST',
+    FRM_OFF_PCITY: 'MIAMI',
+    FRM_OFF_PSTALP: 'FL',
+  },
+} as const satisfies Record<string, Record<string, unknown>>;
+
+/** A branch-level row of `cert` on `date` (`YYYY-MM-DD`) with a unique `ID`, for paging fixtures. */
+export function branchHistoryRow(cert: number, date: string, id: string): Record<string, unknown> {
+  return {
+    ID: id,
+    TRANSNUM: 2026000000,
+    CERT: cert,
+    CHANGECODE: 711,
+    CHANGECODE_DESC: 'Branch Opening',
+    EFFDATE: `${date}T00:00:00`,
+    OFF_NAME: `OFFICE ${id}`,
+  };
 }
 
 /** FDIC's 400 body for a calendar-invalid date in a date-typed range. */

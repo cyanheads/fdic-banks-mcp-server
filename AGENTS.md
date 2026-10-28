@@ -2,9 +2,9 @@
 
 **Server:** fdic-banks-mcp-server
 **Version:** 0.2.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -122,12 +122,12 @@ Conventions every `fdic_` tool follows:
 - Optional inputs are wrapped in `blankAsUnset()` (`src/mcp-server/tools/input-schemas.ts`): form clients submit every field, and a blank string means unset.
 - A handler that calls FDIC takes one `callBudget()` (`callBudget(PANEL_BUDGET_MS)` for the panel) and passes it to every service call, and declares `pacer_shed` and `upstream_rate_limited` with `thrownBy: 'service'`.
 - Dollar amounts stay in thousands, as FDIC publishes them; every data response carries `data_as_of`, and `format()` states the unit.
-- Upstream free text reaches `format()` through `inline()` / `cell()` from `src/mcp-server/tools/markdown.ts`; both flatten line breaks and escape active Markdown once, preserving literal rendered text and unchanged structured values.
-- A result larger than its inline preview is staged through `getCanvasBridge()?.stage(…)`, and the notice uses `stagedNotice()`.
+- Upstream free text reaches `format()` through `inline()` / `cell()` from `src/mcp-server/tools/markdown.ts`; each escapes active Markdown once, and renders a value that Markdown cannot carry as plain text (an empty string, edge whitespace, or any Unicode line break) as its JSON string literal in a one-line code span, so `content[]` carries the same string as `structuredContent`. Numbers go through `num()` / `metricValue()`, which render every digit JSON carries with en-US grouping.
+- A producer pages its rows with `limit` / `offset` and `next_offset`. At offset 0, a result larger than `limit` is also staged through `getCanvasBridge()?.stage(…)` and the notice uses `stagedNotice()`; later pages never stage (`docs/design.md` Design Decision 60).
 
 ### Resources and prompts
 
-None. Every data path is a tool, so tool-only clients reach all of it (`docs/design.md` § Design Decisions 18–19). Use the `add-resource` / `add-prompt` skills if that changes.
+No resources or prompts of the server's own. Every data path is a tool, so tool-only clients reach all of it (`docs/design.md` § Design Decisions 18–19). Use the `add-resource` / `add-prompt` skills if that changes. The one resource a client lists is the published skill: `createApp({ skills: 'skills' })` serves `skills/fdic-banks-guide/SKILL.md` as `skill://fdic-banks-guide/SKILL.md` through the MCP Skills extension.
 
 ### Server config
 
@@ -163,7 +163,7 @@ export function getServerConfig(): ServerConfig {
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
-`src/index.ts` loads `.env` itself before `createApp()`, because two values are read before the framework's own load: the drop gate (`buildToolDefinitions({ dropEnabled })`) and the `CANVAS_PROVIDER_TYPE ??= 'duckdb'` default that turns dataframe staging on. `CANVAS_PROVIDER_TYPE=none` turns it off.
+`src/index.ts` loads `.env` itself before `createApp()`, because two values are read before the framework's own load: the drop gate (`buildToolDefinitions({ dropEnabled })`) and the `CANVAS_PROVIDER_TYPE ||= 'duckdb'` default that turns dataframe staging on (`||=`, so an empty value from a client or plugin config also gets it). `CANVAS_PROVIDER_TYPE=none` turns it off; `manifest.json` pins `none` for the bundle (see Bundling).
 
 ### Server identity and instructions
 
@@ -183,7 +183,7 @@ await createApp({
 
 `description` is never set here: `package.json` `description` is the canonical source, and the framework serves it.
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. This server's string carries the CERT workflow, the tool hand-offs, units and `data_as_of`, the dataframe hand-off, and the rate-limit and untrusted-name hazards; update it when a tool's role changes.
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. This server's string carries the CERT workflow, the tool hand-offs, units and `data_as_of`, paging and the dataframe hand-off, and the rate-limit and untrusted-name hazards; update it when a tool's role changes.
 
 ### Session posture and shutdown
 
@@ -290,18 +290,20 @@ src/
       normalize.ts                      # Raw BankFind rows → domain records
       metric-catalog.ts                 # 49 curated Call Report metrics (field, unit, basis) + default set
       peer-stats.ts                     # Peer median, quartiles, percentile, rank
-      asset-bands.ts, bank-classes.ts, coverage.ts,
+      asset-bands.ts, bank-classes.ts, change-codes.ts, coverage.ts,
       failure-methods.ts, insurance-funds.ts, us-states.ts   # Static reference tables
       types.ts                          # Domain types
     canvas-bridge/
-      canvas-bridge.ts                  # DataCanvas adapter: df_<id> tables, per-table TTL, provenance
+      canvas-bridge.ts                  # DataCanvas adapter: df_<id> tables, per-table TTL, provenance, one canvas per tenant
   mcp-server/
     tools/
       definitions/
-        [tool-name].tool.ts             # 10 tool definitions
+        [tool-name].tool.ts             # 11 tool definitions
         index.ts                        # buildToolDefinitions() — the drop gate
       input-schemas.ts                  # blankAsUnset(), date, metric, and state inputs
       markdown.ts                       # format() helpers: inline, cell, num, metricValue
+skills/
+  fdic-banks-guide/SKILL.md             # Published agent skill: identifier chains, gates, workflows
 ```
 
 ---
@@ -319,9 +321,18 @@ src/
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Two skill trees live at the project root, written for different readers:
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
+| Tree | For | Written by |
+|:-----|:----|:-----------|
+| `framework-skills/` | The agent developing this server — framework skills (`metadata.audience: external`) plus any development-time skills of the server's own | `init` and the `maintenance` sync (framework skills); you (your own) |
+| `skills/` | The agents that install the server and call its tools — tool chains, identifier sources, gates | You, deliberately, with the `add-skill` skill. This server ships one: `skills/fdic-banks-guide/` |
+
+Development skills are modular instructions. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. Their directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand them to every agent that installs it.
+
+A published skill in root `skills/` reaches plugin installs and the `.mcpb` bundle as-is, ships in the npm package and the Docker image, and reaches MCP clients when the server opts in with `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree.
+
+**Agent skill directory:** Copy `framework-skills/` into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
 Available skills:
 
@@ -333,6 +344,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author a skill the server publishes in root `skills/` for the agents that use it — when one earns its place, structure, validation, delivery |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -380,7 +392,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
 | `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
+| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, `.mcpbignore` coverage, plugin manifests, the published `skills/` tree (run by devcheck) |
 | `bun run list-skills` | Print the skill registry |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
@@ -401,9 +413,9 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces `dist/fdic-banks-mcp-server.mcpb`, an extension bundle for one-click install in Claude Desktop; `bun run release:github` attaches it to the GitHub Release. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected.
+`npm run bundle` produces `dist/fdic-banks-mcp-server.mcpb`, an extension bundle for one-click install in Claude Desktop; `bun run release:github` attaches it to the GitHub Release. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/` at a package root, and any stray `SKILL.md` — the MCP SDK's `dist/ext/skills/` runtime, which serves this server's skill, stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. The bundle therefore ships without the DuckDB native, and a bundle running with `duckdb` would start normally and then fail on its first staging call, so `manifest.json` pins `CANVAS_PROVIDER_TYPE` to the literal `"none"` with no `user_config` option for it: the bundle is inline-only, the producers return their pages with no staged table, the dataframe tools report that dataframes are off, and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected.
 
-**Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
+**Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`), except a variable that acts only on staged dataframes (`FDIC_DATASET_TTL_SECONDS`, `FDIC_DATAFRAME_DROP_ENABLED`), which the canvas-off bundle leaves out. `lint:packaging` (run by `devcheck`) verifies that every `manifest.json` variable is in `server.json`, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
 **README install badges.** The README header carries the Claude Desktop badge, which downloads the `.mcpb` from the latest GitHub Release, and Cursor and VS Code badges whose payloads encode `npx -y @cyanheads/fdic-banks-mcp-server`. Regenerate those two payloads when the package name changes or a required env var is added; the `base64` / `encodeURIComponent` snippets are in `framework-skills/polish-docs-meta/references/readme.md`.
 
@@ -470,7 +482,10 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] A new or removed tool also updates `buildToolDefinitions()` (`src/mcp-server/tools/definitions/index.ts`), the README tool tables and count, and the `instructions` string in `src/index.ts`
 - [ ] A new env var also updates `server.json` (both `packages[]` entries), `manifest.json` (`mcp_config.env` + `user_config`), `.env.example`, and the README Configuration table
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] `plugin.json` + `mcp.json` (Agent Plugins 1.0.0 — read by Codex, Cursor, GitHub Copilot, VS Code, Kiro) populated — `plugin.json` `name` = the unscoped repo name (lowercase `a-z`, `0-9`, `-`, `.` only); `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords` from `package.json`; no other top-level field, `extensions` included. `mcp.json` holds one `"type": "stdio"` entry keyed by the unscoped name, `npx -y <full package name>`, and the same fixed `env` as `.codex-plugin/mcp.json`. Neither file carries a user-supplied variable (no `""`, no `${…}` besides `${PLUGIN_ROOT}`/`${PLUGIN_DATA}`): keys reach Codex through `.codex-plugin/mcp.json` `env_vars`, which works only while `.codex-plugin/plugin.json` keeps `"mcpServers": "./.codex-plugin/mcp.json"`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
+- [ ] Any new root dev path has a root-anchored line in `.mcpbignore`; `bun run bundle` and `lint:packaging` pass
+- [ ] If the server publishes a skill in root `skills/`: `lint:packaging` passes, and `field-test` verified every gate and identifier claim in it against live tool behavior
 - [ ] `npm run devcheck` passes

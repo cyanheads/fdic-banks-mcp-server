@@ -2,8 +2,8 @@
  * @fileoverview fdic_query_financials — a multi-institution, multi-quarter Call
  * Report panel filtered by CERTs, state, asset range, and metric thresholds. An
  * aggregation preflight sizes the panel, quarters are fetched newest first up to
- * the panel row cap, and a panel larger than the inline preview is staged as a
- * dataframe for SQL.
+ * the panel row cap, and the sorted panel is returned a page at a time by offset;
+ * the first page stages a panel larger than itself as a dataframe for SQL.
  * @module mcp-server/tools/definitions/query-financials
  */
 
@@ -77,7 +77,7 @@ function comparePanelRows(sortBy: MetricName | undefined, order: 'asc' | 'desc')
 export const queryFinancialsTool = tool('fdic_query_financials', {
   title: 'Query a multi-bank financial panel',
   description:
-    'Pull a multi-institution, multi-quarter Call Report panel — one row per institution per quarter — filtered by CERTs, headquarters state, asset range, and thresholds on any catalog metric. Use it to screen (every bank in a state with a noncurrent-loan rate above 3%) or to build a trend panel for SQL. Returns an inline preview sorted as requested; when the panel exceeds the preview it is staged as a dataframe for fdic_dataframe_query. With no dates it covers the latest published quarter only.',
+    'Pull a multi-institution, multi-quarter Call Report panel — one row per institution per quarter — filtered by CERTs, headquarters state, asset range, and thresholds on any catalog metric. Use it to screen (every bank in a state with a noncurrent-loan rate above 3%) or to build a trend panel for SQL. Returns one page of the panel sorted as requested, continued with offset; at offset 0 a panel larger than the page is also staged as a dataframe for fdic_dataframe_query. With no dates it covers the latest published quarter only.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -131,13 +131,16 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       'Latest quarter, in the same forms as from_date. Omit for the latest published quarter; beside from_date, a later quarter is cut back to it.',
     ),
     sort_by: blankAsUnset(metricEnum.optional()).describe(
-      'Metric to order the preview (and the staged table) by; added to metrics when absent. Omit to order by newest quarter, then CERT.',
+      'Metric to order the pages (and the staged table) by; added to metrics when absent. Omit to order by newest quarter, then CERT.',
     ),
     sort_order: blankAsUnset(z.enum(['asc', 'desc']).default('desc')).describe(
       'desc (default, largest first) or asc; applies to sort_by. Rows without a value sort last.',
     ),
     limit: blankAsUnset(z.number().int().min(1).default(50)).describe(
-      'Positive inline preview count, bounded by the already-fetched panel. A larger panel is staged whole as a dataframe when this deployment stages dataframes.',
+      'Positive count of rows per page, sliced from the already-fetched panel at offset. At offset 0 a larger panel is also staged whole as a dataframe when this deployment stages dataframes.',
+    ),
+    offset: blankAsUnset(z.number().int().min(0).default(0)).describe(
+      'Fetched panel rows to skip; pass next_offset from the previous page. Only offset 0 stages a dataframe.',
     ),
   }),
 
@@ -184,7 +187,12 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
           })
           .describe('One institution-quarter.'),
       )
-      .describe('Inline preview of the panel, sorted as requested.'),
+      .describe('One page of the fetched panel in the requested order, starting at offset.'),
+    next_offset: z
+      .number()
+      .int()
+      .optional()
+      .describe('Offset of the next page; present while fetched rows remain past this page.'),
     metric_definitions: z
       .array(MetricDefinitionSchema)
       .describe('Field, unit, and basis of each metric in rows.'),
@@ -196,7 +204,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       })
       .optional()
       .describe(
-        'The staged full panel; present only when the panel exceeded the preview and this deployment staged it as a dataframe.',
+        'The staged full panel; present only at offset 0 when the panel exceeded limit and this deployment staged it as a dataframe.',
       ),
     data_as_of: z.string().describe('When FDIC last rebuilt the financials index (ISO timestamp).'),
   }),
@@ -207,13 +215,15 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance for zero matches, a capped panel, or where the full panel is staged.'),
+      .describe(
+        'Guidance for zero matches, more pages remaining, a page past the end, a capped panel, or where the full panel is staged.',
+      ),
     truncated: z
       .boolean()
       .optional()
-      .describe('True when the preview holds fewer rows than were fetched.'),
-    shown: z.number().optional().describe('Rows in the preview.'),
-    cap: z.number().optional().describe('The limit applied to the preview.'),
+      .describe('True when fetched rows remain past this page (next_offset is set).'),
+    shown: z.number().optional().describe('Rows on this page.'),
+    cap: z.number().optional().describe('The limit applied to this page.'),
   },
 
   enrichmentTrailer: { ...certSelectionTrailer, ...metricSelectionTrailer },
@@ -382,11 +392,14 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       : [];
     panel.sort(comparePanelRows(input.sort_by, input.sort_order));
     const panelTruncated = plannedRows < preflight.total;
-    const preview = panel.slice(0, input.limit);
+    const page = panel.slice(input.offset, input.offset + input.limit);
+    const end = input.offset + page.length;
+    const hasMore = end < panel.length;
 
     const bridge = getCanvasBridge();
+    // Only the first page stages: every later page re-fetches the same panel, and staging it again would mint a table per page.
     const dataset =
-      bridge && panel.length > input.limit
+      bridge && input.offset === 0 && panel.length > input.limit
         ? await bridge.stage(ctx, {
             sourceTool: 'fdic_query_financials',
             queryParams: {
@@ -457,8 +470,14 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       );
     } else {
       const notes: string[] = clampNote ? [clampNote] : [];
-      if (panel.length > preview.length) {
-        notes.push(`Showing ${preview.length} of ${panel.length} fetched rows.`);
+      if (hasMore) {
+        notes.push(
+          `Showing rows ${input.offset + 1}–${end} of ${panel.length} fetched rows; pass offset ${end} for the next page.`,
+        );
+      } else if (input.offset > 0 && page.length === 0) {
+        notes.push(
+          `offset ${input.offset} is past the last of ${panel.length} fetched rows; lower offset or omit it.`,
+        );
       }
       if (panelTruncated) {
         const partial = plan.length === 1 && plannedRows < (preflight.quarters[0]?.rows ?? 0);
@@ -469,12 +488,9 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
         );
       }
       if (dataset) notes.push(stagedNotice(dataset));
-      else if (panel.length > preview.length) {
-        notes.push('Raise limit or narrow the filters to see the rest inline.');
-      }
-      if (panel.length > preview.length) {
+      if (hasMore) {
         ctx.enrich.truncated({
-          shown: preview.length,
+          shown: page.length,
           cap: input.limit,
           guidance: notes.join(' '),
         });
@@ -488,6 +504,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       to,
       totalMatching: preflight.total,
       fetched: panel.length,
+      offset: input.offset,
       staged: dataset?.name,
     });
 
@@ -498,7 +515,8 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       rows_fetched: panel.length,
       panel_row_cap: panelMaxRows,
       panel_truncated: panelTruncated,
-      rows: preview,
+      rows: page,
+      ...(hasMore ? { next_offset: end } : {}),
       metric_definitions: metricDefinitions(metrics),
       ...(dataset ? { dataset } : {}),
       data_as_of: preflight.dataAsOf,
@@ -511,6 +529,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       `Report dates ${result.report_dates_defaulted ? 'defaulted to the latest published quarter' : 'as requested'}. Data as of ${result.data_as_of}. Dollar amounts are thousands of US dollars.`,
       `${num(result.total_matching)} matching institution-quarters · ${num(result.rows_fetched)} fetched (panel row cap ${num(result.panel_row_cap)}${result.panel_truncated ? '; panel truncated at the row cap — matching rows past it were not fetched' : '; panel complete'}) · ${result.rows.length} shown.`,
     ];
+    if (result.next_offset !== undefined) lines.push(`Next page: offset ${result.next_offset}.`);
     if (result.dataset) {
       lines.push(
         `**Staged:** ${result.dataset.name} — ${num(result.dataset.row_count)} rows, expires ${result.dataset.expires_at}. Query it with fdic_dataframe_query.`,

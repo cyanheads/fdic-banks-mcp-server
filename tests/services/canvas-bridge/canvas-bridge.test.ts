@@ -6,14 +6,16 @@
  * reasons (its recovery filled in by the framework, asserted in the tool tests),
  * DuckDB table resolution, register_as provenance, drop, the staging budget's oldest-first
  * eviction and register_as_too_large, the lazy TTL sweep, canvas expiry,
- * staging failure and cancellation, tenant isolation, and the listing option.
+ * staging failure and cancellation, concurrent first calls resolving one canvas
+ * per tenant (fresh and after expiry, beside a slow cleanup, and under owner and
+ * waiter cancellation), tenant isolation, and the listing option.
  * @module tests/services/canvas-bridge/canvas-bridge.test
  */
 
 import type { ColumnSchema, DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, type MockContextLogger } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import {
   CanvasBridge,
@@ -81,6 +83,14 @@ async function canvasTables(): Promise<string[]> {
   const instance = await canvas.acquire(id, ctx);
   return (await instance.describe()).map((t) => t.name);
 }
+
+beforeAll(async () => {
+  // Load the DuckDB native binding once, outside any test's timeout.
+  const warm = createDuckdbCanvas();
+  const ctx = createMockContext();
+  await (await warm.acquire(undefined, ctx)).registerTable('warm', [{ n: 1 }]);
+  await warm.shutdown(ctx);
+});
 
 beforeEach(() => {
   session = tenantSession();
@@ -317,7 +327,306 @@ describe('canvas creation', () => {
   it('mints no canvas for a describe or a drop on a tenant that never staged anything', async () => {
     expect(await bridge.describe(session())).toEqual([]);
     expect(await bridge.drop(session(), 'df_NEVER_STAGE')).toBe(false);
+    expect(await Promise.all([bridge.describe(session()), bridge.drop(session(), 'df_X')])).toEqual(
+      [[], false],
+    );
     expect(await session().state.get('canvas-id')).toBeNull();
+    expect(canvas.countForTenant(session())).toBe(0);
+  });
+});
+
+describe('concurrent canvas resolution', () => {
+  type SaveKind = 'stage' | 'query';
+  const HOUR_MS = 3_600_000;
+  const MIXED: SaveKind[] = ['stage', 'query', 'stage', 'query', 'stage', 'query'];
+
+  /** Saves `SELECT i AS value` as a dataframe through a stage or a register_as query. */
+  async function save(kind: SaveKind, i: number, ctx = session()): Promise<string | undefined> {
+    if (kind === 'stage') {
+      const dataset = await bridge.stage(
+        ctx,
+        stageOptions({ rows: [{ value: i }], schema: [{ name: 'value', type: 'INTEGER' }] }),
+      );
+      return dataset?.name;
+    }
+    const { meta } = await bridge.query(ctx, `SELECT ${i} AS value`, {
+      rowLimit: 10,
+      registerAs: `df_RACE0_${String(i).padStart(5, '0')}`,
+    });
+    return meta?.tableName;
+  }
+
+  /**
+   * Canvases the registry holds for the tenant (counted first: a check below
+   * could mint one), then every saved name that fails to describe or select.
+   */
+  async function outcome(names: readonly (string | undefined)[]) {
+    const canvases = canvas.countForTenant(session());
+    const unusable: string[] = [];
+    for (const name of names) {
+      const described = name !== undefined && (await bridge.describe(session(), name)).length === 1;
+      const selected =
+        name !== undefined &&
+        (await bridge.query(queryCtx(), `SELECT COUNT(*) AS n FROM ${name}`, { rowLimit: 1 }).then(
+          () => true,
+          () => false,
+        ));
+      if (!described || !selected) unusable.push(name ?? 'not saved');
+    }
+    return { canvases, unusable };
+  }
+
+  /** Canvas resolutions the bridge still tracks; none once every call has settled. */
+  function pendingResolutions(): number {
+    const resolutions: unknown = Reflect.get(bridge, 'resolutions');
+    if (!(resolutions instanceof Map)) throw new Error('CanvasBridge tracks no resolutions map');
+    return resolutions.size;
+  }
+
+  type AcquireContext = Parameters<DataCanvas['acquire']>[1];
+
+  /**
+   * The test's real canvas, reporting each `acquire` as it starts and as it
+   * ends; `minted` marks the end of a mint (no ID asked for) that succeeded.
+   */
+  function observedCanvas(
+    observe: (
+      event: 'start' | 'end',
+      call: { ctx: AcquireContext; minted: boolean; id?: string },
+    ) => void,
+  ): DataCanvas {
+    return Object.assign(Object.create(canvas) as DataCanvas, {
+      async acquire(...args: Parameters<DataCanvas['acquire']>) {
+        const [id, ctx] = args;
+        observe('start', { ctx, minted: false, ...(id !== undefined ? { id } : {}) });
+        let minted = false;
+        try {
+          const instance = await canvas.acquire(...args);
+          minted = id === undefined;
+          return instance;
+        } finally {
+          observe('end', { ctx, minted, ...(id !== undefined ? { id } : {}) });
+        }
+      },
+    });
+  }
+
+  /** Seeds a dataframe on a canvas with a one-hour TTL, then moves the clock past it. */
+  async function expireTenantCanvas(): Promise<void> {
+    await canvas.shutdown(createMockContext());
+    useCanvas({ canvasTtlMs: HOUR_MS });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0);
+    await save('stage', 99);
+    vi.setSystemTime(T0.getTime() + 2 * HOUR_MS);
+  }
+
+  it.each<[string, SaveKind[]]>([
+    ['stage() calls', Array<SaveKind>(6).fill('stage')],
+    ['register_as query() calls', Array<SaveKind>(6).fill('query')],
+    ['stage() and register_as query() calls', MIXED],
+  ])(
+    '%s arriving together on a new tenant share one canvas, and every saved dataframe describes and selects',
+    async (_label, kinds) => {
+      const names = await Promise.all(kinds.map((kind, i) => save(kind, i)));
+      expect(await outcome(names)).toEqual({ canvases: 1, unusable: [] });
+      expect(new Set(names).size).toBe(kinds.length);
+      expect(pendingResolutions()).toBe(0);
+    },
+  );
+
+  it('calls arriving together after the canvas expired share one fresh canvas', async () => {
+    await expireTenantCanvas();
+    const names = await Promise.all(MIXED.map((kind, i) => save(kind, i)));
+    // The expired canvas stays registered until the registry's sweeper, off here, removes it.
+    expect(await outcome(names)).toEqual({ canvases: 2, unusable: [] });
+    expect(pendingResolutions()).toBe(0);
+  });
+
+  it.each([
+    ['describe', (ctx: ReturnType<typeof session>) => bridge.describe(ctx)],
+    ['drop', (ctx: ReturnType<typeof session>) => bridge.drop(ctx, 'df_NEVER_STAGE')],
+  ] as const)(
+    "a %s whose provenance listing is slow, beside a stage after the canvas expired, keeps the stage's canvas and provenance",
+    async (_label, operate) => {
+      await expireTenantCanvas();
+      const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+      let releaseList!: () => void;
+      const listGate = new Promise<void>((resolve) => {
+        releaseList = resolve;
+      });
+      /** Set once the slow call blocks on its listing, holding the expired canvas ID. */
+      let listReached = false;
+      const slow = session();
+      const slowState = slow.state;
+      Object.assign(slow, {
+        state: new Proxy(slowState, {
+          get: (target, key) =>
+            key === 'list'
+              ? async (...args: Parameters<typeof slowState.list>) => {
+                  listReached = true;
+                  await listGate;
+                  return await target.list(...args);
+                }
+              : Reflect.get(target, key),
+        }),
+      });
+
+      /**
+       * The stage's activity, so the gate can open once the stage has stored its
+       * canvas ID, or once it sits waiting with nothing in flight.
+       */
+      const stageCtx = session();
+      const stageState = stageCtx.state;
+      let activity = 0;
+      let inFlight = 0;
+      let stored = false;
+      const track = async <T>(run: () => Promise<T>): Promise<T> => {
+        activity++;
+        inFlight++;
+        try {
+          return await run();
+        } finally {
+          inFlight--;
+          activity++;
+        }
+      };
+      Object.assign(stageCtx, {
+        state: new Proxy(stageState, {
+          get(target, key) {
+            const member: unknown = Reflect.get(target, key);
+            if (typeof member !== 'function') return member;
+            return async (...args: unknown[]) => {
+              const result: unknown = await track(async () => await member.apply(target, args));
+              if (key === 'set' && args[0] === 'canvas-id') stored = true;
+              return result;
+            };
+          },
+        }),
+      });
+      bridge = new CanvasBridge(
+        observedCanvas((event, call) => {
+          if (call.ctx !== stageCtx) return;
+          activity++;
+          inFlight += event === 'start' ? 1 : -1;
+        }),
+      );
+
+      const operating = operate(slow);
+      await turn();
+      const staging = save('stage', 1, stageCtx);
+      for (let idle = 0, seen = -1; !stored && idle < 20; ) {
+        await turn();
+        if (inFlight > 0 || activity !== seen) {
+          seen = activity;
+          idle = 0;
+        } else idle++;
+      }
+      // Without this, a slow call that never blocked on its listing would pass without the race.
+      expect(listReached).toBe(true);
+      releaseList();
+      const [name] = await Promise.all([staging, operating]);
+
+      expect(name).toMatch(TABLE_NAME);
+      expect(await outcome([name])).toEqual({ canvases: 2, unusable: [] });
+      expect(await canvasTables()).toEqual([name]);
+      expect(pendingResolutions()).toBe(0);
+    },
+  );
+
+  it('cancelling the call that mints, once its canvas exists, rejects that call with AbortError while the rest share one canvas', async () => {
+    const controllers = Array.from({ length: 4 }, () => new AbortController());
+    const contexts = controllers.map((c) => session({ signal: c.signal }));
+    let owner = -1;
+    let mintsStarted = 0;
+    let late: Promise<string | undefined> | undefined;
+    bridge = new CanvasBridge(
+      observedCanvas((event, call) => {
+        if (call.id !== undefined) return;
+        // A call arriving while the next call's mint is in flight queues behind it.
+        if (event === 'start' && ++mintsStarted === 2) late = save('stage', 9);
+        if (event === 'end' && call.minted && owner === -1) {
+          owner = contexts.indexOf(call.ctx as (typeof contexts)[number]);
+          controllers[owner]?.abort();
+        }
+      }),
+    );
+
+    const settled = await Promise.allSettled(contexts.map((ctx, i) => save('stage', i, ctx)));
+    expect(owner).toBeGreaterThanOrEqual(0);
+    const ownerResult = settled[owner];
+    expect(ownerResult?.status).toBe('rejected');
+    const reason: unknown = ownerResult?.status === 'rejected' ? ownerResult.reason : undefined;
+    expect(reason).toBe(controllers[owner]?.signal.reason);
+    expect(reason).toMatchObject({ name: 'AbortError' });
+
+    const others = settled.filter((_, i) => i !== owner);
+    expect(others.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
+    const names = others.map((r) => (r.status === 'fulfilled' ? r.value : undefined));
+    names.push(await late);
+    expect(await outcome(names)).toEqual({ canvases: 1, unusable: [] });
+    expect(pendingResolutions()).toBe(0);
+  });
+
+  it('a call cancelled while it waits for the resolution rejects with AbortError while the rest share one canvas', async () => {
+    const controllers = Array.from({ length: 4 }, () => new AbortController());
+    /**
+     * Each call's canvas-ID reads and the mints, in order: a call reads the ID once
+     * on arrival (then queues) and again when its own resolution runs.
+     */
+    const log: string[] = [];
+    const contexts = controllers.map((c, i) => {
+      const ctx = session({ signal: c.signal });
+      const state = ctx.state;
+      return Object.assign(ctx, {
+        state: new Proxy(state, {
+          get: (target, key) =>
+            key === 'get'
+              ? async (...args: Parameters<typeof state.get>) => {
+                  if (args[0] === 'canvas-id') log.push(`read ${i}`);
+                  return await target.get(...args);
+                }
+              : Reflect.get(target, key),
+        }),
+      });
+    });
+    const reads = (i: number) => log.filter((entry) => entry === `read ${i}`).length;
+    let waiter = -1;
+    bridge = new CanvasBridge(
+      observedCanvas((event, call) => {
+        if (call.id !== undefined) return;
+        const caller = contexts.indexOf(call.ctx as (typeof contexts)[number]);
+        log.push(`mint ${event} ${caller}`);
+        if (event !== 'start' || waiter !== -1) return;
+        // The first mint has started; cancel a call that arrived and is queued behind it.
+        waiter = contexts.findIndex((_, i) => i !== caller && reads(i) === 1);
+        controllers[waiter]?.abort();
+      }),
+    );
+
+    const settled = await Promise.allSettled(
+      contexts.map((ctx, i) => save(i % 2 === 0 ? 'stage' : 'query', i, ctx)),
+    );
+    expect(waiter).toBeGreaterThanOrEqual(0);
+    // It ran its own resolution only after the first mint ended, and never minted.
+    const firstMintEnd = log.findIndex((entry) => entry.startsWith('mint end'));
+    expect(firstMintEnd).toBeGreaterThanOrEqual(0);
+    expect(reads(waiter)).toBe(2);
+    expect(log.lastIndexOf(`read ${waiter}`)).toBeGreaterThan(firstMintEnd);
+    expect(log).not.toContain(`mint start ${waiter}`);
+    const waiterResult = settled[waiter];
+    expect(waiterResult?.status).toBe('rejected');
+    const reason: unknown = waiterResult?.status === 'rejected' ? waiterResult.reason : undefined;
+    expect(reason).toBe(controllers[waiter]?.signal.reason);
+    expect(reason).toMatchObject({ name: 'AbortError' });
+
+    const others = settled.filter((_, i) => i !== waiter);
+    expect(others.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
+    expect(
+      await outcome(others.map((r) => (r.status === 'fulfilled' ? r.value : undefined))),
+    ).toEqual({ canvases: 1, unusable: [] });
+    expect(pendingResolutions()).toBe(0);
   });
 });
 

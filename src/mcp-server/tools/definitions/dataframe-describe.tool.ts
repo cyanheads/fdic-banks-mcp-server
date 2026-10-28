@@ -18,7 +18,7 @@ const LISTING_PAGE = 50;
 export const dataframeDescribeTool = tool('fdic_dataframe_describe', {
   title: 'Describe staged dataframes',
   description:
-    "Describe the df_<id> dataframes that fdic_query_financials and fdic_get_deposits staged when a result exceeded its inline preview, plus any that fdic_dataframe_query saved with register_as. Pass name (from a dataset field) for one dataframe in full: source tool, the parameters it was called with, row count, creation and expiry time, column schema, and the unit and basis of each amount, ratio, or count column (thousands of dollars, percent, or count). Read a table's columns this way before writing SQL for fdic_dataframe_query. Omit name to list the live dataframes, newest first, 50 per page, as name, source tool, row count, and expiry only. A deployment that serves HTTP without authentication, where every caller shares one canvas, does not list; there, pass the name a dataset field returned.",
+    "Describe the df_<id> dataframes that fdic_query_financials and fdic_get_deposits staged when a result at offset 0 was larger than one page, plus any that fdic_dataframe_query saved with register_as. Pass name (from a dataset field) for one dataframe in full: source tool, the parameters it was called with, row count, creation and expiry time, column schema, and the unit and basis of each amount, ratio, or count column (thousands of dollars, percent, or count). Read a table's columns this way before writing SQL for fdic_dataframe_query. Omit name to list the live dataframes, newest first, 50 per page, as name, source tool, row count, and expiry only. A deployment that serves HTTP without authentication, where every caller shares one canvas, does not list; there, pass the name a dataset field returned.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -138,7 +138,7 @@ export const dataframeDescribeTool = tool('fdic_dataframe_describe', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'DataCanvas is not configured in this deployment',
       recovery:
-        'Dataframes are off in this deployment; use the inline rows the fdic_ tools return, or ask the operator to set CANVAS_PROVIDER_TYPE=duckdb.',
+        'Dataframes are off in this deployment; page fdic_query_financials and fdic_get_deposits with offset and next_offset instead. A self-hosted server turns them on with CANVAS_PROVIDER_TYPE=duckdb.',
       severity: 'notice',
     },
     {
@@ -200,7 +200,7 @@ export const dataframeDescribeTool = tool('fdic_dataframe_describe', {
     const hasMore = end < total;
     if (total === 0) {
       ctx.enrich.notice(
-        'Nothing is staged. fdic_query_financials and fdic_get_deposits stage a dataframe when a result exceeds their inline preview.',
+        'Nothing is staged. fdic_query_financials and fdic_get_deposits stage a dataframe when a result at offset 0 is larger than one page.',
       );
     } else if (page.length === 0) {
       ctx.enrich.notice(

@@ -22,7 +22,13 @@ import {
   initCanvasBridge,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { createDuckdbCanvas, tenantSession } from '../helpers/canvas.js';
-import { contractRecovery, structured, textOf, toolError } from '../helpers/tool-results.js';
+import {
+  contractRecovery,
+  readMarkdownText,
+  structured,
+  textOf,
+  toolError,
+} from '../helpers/tool-results.js';
 
 type Output = z.infer<typeof dataframeQueryTool.output> & {
   cap?: number;
@@ -151,16 +157,16 @@ describe('pages through the production contract', () => {
     expect(text).toContain('\\<b\\>\\*x\\*\\</b\\>');
     expect(text).toContain('\\[label\\]');
   });
-  it('fails canvas_unavailable with its contract recovery when the canvas is off', async () => {
+  it('fails canvas_unavailable pointing at offset pages first when the canvas is off', async () => {
     initCanvasBridge(undefined);
-    const { result } = await run({ sql: 'SELECT 1' });
+    const { result, text } = await run({ sql: 'SELECT 1' });
+    const hint =
+      'Dataframes are off in this deployment; page fdic_query_financials and fdic_get_deposits with offset and next_offset instead. A self-hosted server turns them on with CANVAS_PROVIDER_TYPE=duckdb.';
     expect(toolError(result)).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
-      data: {
-        reason: 'canvas_unavailable',
-        recovery: { hint: contractRecovery(tool, 'canvas_unavailable') },
-      },
+      data: { reason: 'canvas_unavailable', recovery: { hint } },
     });
+    expect(readMarkdownText(text).split('\n')).toContain(`Recovery: ${hint}`);
   });
 
   it('validates the zero-row page with its notice on both surfaces', async () => {
@@ -264,7 +270,7 @@ describe('pages through the production contract', () => {
 
   it('returns typed values in structuredContent and renders them as table cells', async () => {
     const { result, text } = await run({
-      sql: "SELECT 1.5::DOUBLE AS d, COUNT(*) AS n, DATE '2026-06-30' AS day, [1, 2] AS list, NULL AS nothing, 'a|b' AS piped, 'line1' || chr(10) || '# SYSTEM' AS multi",
+      sql: "SELECT 1.5::DOUBLE AS d, COUNT(*) AS n, DATE '2026-06-30' AS day, [1, 2] AS list, NULL AS nothing, '' AS empty, 'a|b' AS piped, 'line1' || chr(10) || '# SYSTEM' AS multi, 'a' || chr(13) || chr(10) || 'b|c' AS crlf, ' padded ' AS ws",
     });
     expect(structured<Output>(result).rows).toEqual([
       {
@@ -273,13 +279,25 @@ describe('pages through the production contract', () => {
         day: '2026-06-30',
         list: [1, 2],
         nothing: null,
+        empty: '',
         piped: 'a|b',
         multi: 'line1\n# SYSTEM',
+        crlf: 'a\r\nb|c',
+        ws: ' padded ',
       },
     ]);
-    expect(text).toContain('| d | n | day | list | nothing | piped | multi |');
-    expect(text).toContain('| 1.5 | 1 | 2026-06-30 | \\[1,2\\] |  | a\\|b | line1 \\# SYSTEM |');
+    const lines = text.split('\n');
+    expect(lines).toContain('| d | n | day | list | nothing | empty | piped | multi | crlf | ws |');
+    expect(lines).toContain(
+      '| 1.5 | 1 | 2026-06-30 | \\[1,2\\] |  | `""` | a\\|b | `"line1\\n# SYSTEM"` | `"a\\r\\nb\\|c"` | `" padded "` |',
+    );
     expect(text).not.toContain('\n# SYSTEM');
+  });
+
+  it('renders a column name with a line break as an inline JSON code span on the zero-row page', async () => {
+    const { result, text } = await run({ sql: 'SELECT 1 AS "x|y\nz" WHERE false' });
+    expect(structured<Output>(result).columns).toEqual(['x|y\nz']);
+    expect(text.split('\n')).toContain('Columns: `"x|y\\nz"`');
   });
 });
 
@@ -316,7 +334,7 @@ describe('SQL rejections', () => {
       data: { reason, recovery: { hint: contractRecovery(tool, reason) } },
     });
     expect(text).toContain(`reason ${reason}`);
-    expect(text).toContain(contractRecovery(tool, reason));
+    expect(readMarkdownText(text)).toContain(contractRecovery(tool, reason));
   });
 
   it('says a missing df_ table may have been dropped to make room, on both surfaces', async () => {
@@ -342,7 +360,7 @@ describe('SQL rejections', () => {
     });
     expect(text).toContain('reason register_as_too_large');
     expect(text).toContain('5 rows');
-    expect(text).toContain(contractRecovery(tool, 'register_as_too_large'));
+    expect(readMarkdownText(text)).toContain(contractRecovery(tool, 'register_as_too_large'));
   });
 
   it('refuses register_as naming a staged dataframe as register_as_clash', async () => {
@@ -380,7 +398,44 @@ describe('SQL rejections', () => {
         recovery: { hint: contractRecovery(tool, 'register_as_clash') },
       },
     });
-    expect(text).toContain(contractRecovery(tool, 'register_as_clash'));
+    expect(readMarkdownText(text)).toContain(contractRecovery(tool, 'register_as_clash'));
+  });
+
+  it('refuses a staged current_schema column read unqualified, tells the caller to qualify it, and runs it qualified', async () => {
+    const session = tenantSession();
+    const staged = await getCanvasBridge()?.stage(session(), {
+      sourceTool: 'fdic_query_financials',
+      queryParams: {},
+      rows: [{ cert: 1, current_schema: 'kept' }],
+      schema: [
+        { name: 'cert', type: 'INTEGER' },
+        { name: 'current_schema', type: 'VARCHAR' },
+      ],
+    });
+    const name = staged?.name ?? '';
+    expect(name).toMatch(/^df_[A-Z0-9]{5}_[A-Z0-9]{5}$/);
+    const call = (sql: string) =>
+      tool.handler(tool.input.parse({ sql }), session({ errors: tool.errors }));
+
+    await expect(call(`SELECT current_schema FROM ${name}`)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'denied_function' },
+    });
+    const qualified = tool.output.parse(await call(`SELECT t.current_schema FROM ${name} t`));
+    expect(qualified.rows).toEqual([{ current_schema: 'kept' }]);
+
+    // The contract boundary supplies the recovery the bridge leaves to it.
+    const { result, text } = await run({
+      sql: 'SELECT current_schema FROM (SELECT 1 AS current_schema) t',
+    });
+    const recovery =
+      'Remove the refused function, or qualify a column named current_schema with its table (t.current_schema); query only df_ tables named in a dataset field or by fdic_dataframe_describe.';
+    expect(toolError(result)).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'denied_function', recovery: { hint: recovery } },
+    });
+    expect(text).toContain('reason denied_function');
+    expect(readMarkdownText(text).split('\n')).toContain(`Recovery: ${recovery}`);
   });
 
   it.each<[string, Record<string, unknown>]>([

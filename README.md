@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/fdic-banks-mcp-server</h1>
-  <p><b>Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share via MCP. STDIO or Streamable HTTP.</b>
-  <div>10 Tools</div>
+  <p><b>Search FDIC-insured banks, Call Report financials, peer rankings, failures, mergers, deposit share via MCP. STDIO or Streamable HTTP.</b>
+  <div>11 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fdic-banks-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fdic-banks-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fdic-banks-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fdic-banks-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fdic-banks-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fdic-banks-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-Every FDIC-insured bank and savings institution, open, merged, or failed, from the [FDIC BankFind Suite API](https://api.fdic.gov/banks/docs/). Read quarterly Call Report financials back to 1984, rank a bank against peers, screen many at once, search failures since 1934, and map branch deposits and market share. Credit unions are NCUA-insured and not included. No API key required.
+Every FDIC-insured bank and savings institution, open, merged, or failed, from the [FDIC BankFind Suite API](https://api.fdic.gov/banks/docs/). Read quarterly Call Report financials back to 1984, rank a bank against peers, screen many at once, search failures since 1934, trace a bank's mergers, renames, and charter changes, and map branch deposits and market share. Credit unions are NCUA-insured and not included. No API key required.
 
 ### Tools
 
@@ -37,23 +37,24 @@ Every FDIC-insured bank and savings institution, open, merged, or failed, from t
 |:---|:---|
 | `fdic_search_institutions` | Find institutions by name, CERT, location, size, charter class, or holding company; returns the CERT every other tool takes |
 | `fdic_get_institution_financials` | One institution's quarterly Call Report history, most recent first, with its profile |
+| `fdic_get_institution_history` | One institution's structure-change events, newest first: mergers, failures, branch purchases, renames, relocations, and charter changes, with the other institution named |
 | `fdic_compare_peers` | One institution against a peer group for one quarter: peer median, quartiles, range, percentile, and rank per metric |
 | `fdic_query_financials` | Multi-bank, multi-quarter Call Report panel filtered by CERTs, state, asset range, and metric thresholds |
 | `fdic_search_failures` | Bank failures and assistance transactions since 1934, with totals, per-method subtotals, and optional grouping |
 | `fdic_get_deposits` | Summary of Deposits: an institution's branches and state market share, or a market ranked by deposits with HHI |
-| `fdic_list_reference` | Metric catalog, charter classes, failure methods, insurance funds, peer asset bands, and dataset coverage |
+| `fdic_list_reference` | Metric catalog, charter classes, failure methods, structure-change codes, insurance funds, peer asset bands, and dataset coverage |
 | `fdic_dataframe_describe` | List staged dataframes, or describe one by name: provenance, columns, and units |
 | `fdic_dataframe_query` | Run one read-only DuckDB `SELECT` across staged dataframes |
 | `fdic_dataframe_drop` | Drop a staged dataframe before its TTL; off unless `FDIC_DATAFRAME_DROP_ENABLED=true` |
 
 ### Dataframe workflow
 
-1. `fdic_query_financials` and `fdic_get_deposits` return an inline preview. When the full result is larger than `limit`, they also stage it as a `df_XXXXX_XXXXX` table and name it in the `dataset` field.
+1. `fdic_query_financials` and `fdic_get_deposits` return one page of rows at a time (`limit`, `offset`); while rows remain, `next_offset` names the next page. At `offset` 0, when the full result is larger than `limit`, they also stage it as a `df_XXXXX_XXXXX` table and name it in the `dataset` field; later pages never stage.
 2. Pass that name to `fdic_dataframe_describe` for the table's columns, units, and basis.
 3. Query it with `fdic_dataframe_query`: joins, aggregates, window functions, and CTEs across every staged table. `register_as` saves a result as a new table.
 4. Tables expire after `FDIC_DATASET_TTL_SECONDS` (default 24 hours). The live tables hold 1,000,000 rows together, and the oldest are dropped past that.
 
-Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns it off. The Claude Desktop `.mcpb` bundle ships without DuckDB's native binding, so there the dataframe tools report an install hint and every other tool works normally.
+Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns it off. The Claude Desktop `.mcpb` bundle ships without DuckDB's native binding and sets `CANVAS_PROVIDER_TYPE=none`, so there the two producers return their rows a page at a time, continued with `offset` and `next_offset`, the dataframe tools report that dataframes are off, and every other tool works normally.
 
 ## Capability reference
 
@@ -73,6 +74,14 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 
 ---
 
+### `fdic_get_institution_history` <sub>tool</sub>
+
+- `cert` required; `event_types` (omitted = every type but `branch`) selects from `merger`, `failure_or_assistance`, `branch_purchase`, `name_change`, `relocation`, `charter_change`, `opening`, `closing`, `other`, and `branch` (branch-level openings, closings, sales, and relocations); `from_date` / `to_date` (YYYY-MM-DD, inclusive) bound the effective date
+- Events run newest first. Each carries `effective_date`, `event_type`, `change_code`, `change_description`, and `role` (`subject`, `outgoing`, `survivor`, `buyer`, `seller`), plus `counterparty` (CERT and name of the other institution), `changes` (former and new values of name, address, city, state, class, chartering agency, regulator), `branch` (the office, on branch events), and `transaction_number` (shared by the rows of one deal) where FDIC recorded them. A merger or failure appears once, whichever side the CERT was on
+- `limit` (default 50, no maximum) and `offset` page the list; `total`, `next_offset`, and `event_types_filter` report the match; `data_as_of` is the history index build time. Mergers start in 1969 and failures in 1970; an unknown CERT fails as `cert_not_found`
+
+---
+
 ### `fdic_compare_peers` <sub>tool</sub>
 
 - `cert` required; `report_date` defaults to the latest published quarter (`report_date_defaulted`); up to 20 `metrics`
@@ -84,14 +93,14 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 ### `fdic_query_financials` <sub>tool</sub>
 
 - Filters: up to 100 `certs`, `state`, `min_assets` / `max_assets`, up to 5 `metric_filters` (`metric` with `min` and/or `max`), and up to 30 `metrics`; `from_date` / `to_date` default to the latest published quarter
-- Inline `limit` defaults to 50, ordered by `sort_by` / `sort_order`; a larger panel is staged whole as a dataframe
+- `limit` (default 50) rows per page, ordered by `sort_by` / `sort_order`, continued with `offset` / `next_offset`; at `offset` 0 a larger panel is also staged whole as a dataframe
 - The panel is capped at `FDIC_PANEL_MAX_ROWS` (default 50,000), keeping the newest quarters; `total_matching`, `rows_fetched`, and `panel_truncated` report what was left out
 
 ---
 
 ### `fdic_search_failures` <sub>tool</sub>
 
-- Filters: `name`, `certs` (first 50 unique; events before 1977 carry none), `state`, `from_date` / `to_date` (YYYY-MM-DD), `methods`, `min_assets`; `resolution` is `failure` by default, or `assistance` or `all`
+- Filters: `name`, `certs` (first 50 unique; most events before 1977 carry none), `state`, `from_date` / `to_date` (YYYY-MM-DD), `methods`, `min_assets`; `resolution` is `failure` by default, or `assistance` or `all`
 - `summary` totals every matching event with a `by_method` breakdown; `group_by` (`year`, `state`, `method`, `insurance_fund`) adds `groups`
 - `total_assets_missing_count`, `total_deposits_missing_count`, and `estimated_loss_missing_count` count unreported amounts, and a total is `null` when no match has a recorded amount. `sort` by date, loss, or assets; up to 200 per page (default 25)
 
@@ -101,14 +110,14 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 
 - `cert` alone returns the institution's branches and deposit share in each state (`mode: "institution"`); a geography (`state`, `county`, `city`, `zip`, `msa_code`) ranks every institution in that market with `hhi` (`market`); both together give `institution_in_market`. `county` and `city` require `state`
 - `year` from 1994 on, defaulting to the latest survey (`year_defaulted`); deposits are domestic branch deposits as of June 30, in thousands of US dollars
-- Inline `limit` defaults to 25; a larger set is staged as a dataframe, and `total_rows` gives the full count
+- `limit` (default 25) rows per page, continued with `offset` / `next_offset`; at `offset` 0 a larger set is also staged as a dataframe, and `total_rows` gives the full count
 
 ---
 
 ### `fdic_list_reference` <sub>tool</sub>
 
-- One `topic` per call: `metrics`, `bank_classes`, `failure_methods`, `insurance_funds`, `peer_asset_bands`, or `coverage`
-- `metrics` lists all 49 metric names with FDIC field, unit, basis, caveat, and `in_default_set`; served from built-in tables with no request to FDIC
+- One `topic` per call: `metrics`, `bank_classes`, `failure_methods`, `change_codes`, `insurance_funds`, `peer_asset_bands`, or `coverage`
+- `metrics` lists all 49 metric names with FDIC field, unit, basis, caveat, and `in_default_set`; `change_codes` lists the 41 FDIC structure-change codes with their `event_type` and `level` (`institution`, `branch`, or `both`); served from built-in tables with no request to FDIC
 
 ---
 
@@ -139,11 +148,11 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 FDIC-specific:
 
-- Reads four BankFind datasets: institutions (every insured charter, active and inactive), quarterly Call Report financials from 1984, failures and assistance transactions from 1934, and the annual Summary of Deposits from 1994
-- Paced requests (`FDIC_RATE_LIMIT_RPS`, at most four in flight) with a response cache and a cooldown after an FDIC 429; each call has a 45-second budget (55 seconds for a panel)
+- Reads five BankFind datasets: institutions (every insured charter, active and inactive), quarterly Call Report financials from 1984, failures and assistance transactions from 1934, structure-change history (mergers from 1969, failures from 1970), and the annual Summary of Deposits from 1994
+- Paced requests (`FDIC_RATE_LIMIT_RPS`, at most four in flight) with a response cache and a cooldown after an FDIC 429, retried honoring `Retry-After`; each call has a 45-second budget (55 seconds for a panel, or a history read that includes `branch`)
 - A curated catalog of 49 Call Report metrics with FDIC field code, unit, and basis; `_ytd` metrics accumulate from January 1, and unsuffixed income and return metrics cover a single quarter
 - Handles BankFind's quirks: case-sensitive code values, string-typed report dates, absence sentinels, and ratios reported as `0` when a bank did not report them
-- Array inputs are deduplicated in order and capped at 1,000 items; empty `certs`, `peer_certs`, `bank_classes`, and `methods` are rejected
+- Array inputs are deduplicated in order and capped at 1,000 items; empty `certs`, `peer_certs`, `bank_classes`, `methods`, and `event_types` are rejected
 
 Agent-friendly output:
 
@@ -151,116 +160,38 @@ Agent-friendly output:
 - Unreported metrics come back `null`; nothing is filled in
 - Typed errors with recovery text that names the next call (`cert_not_found`, `conflicting_peer_filters`, `no_report_for_period`); rate-limit errors (`pacer_shed`, `upstream_rate_limited`) carry `retryAfter`
 - `processed_certs` / `deferred_certs` and `processed_metrics` / `deferred_metrics` separate what was queried from what to pass in a new call
+- Publishes the `fdic-banks-guide` agent skill (root `skills/`: identifier chains, gates, multi-step workflows), served to MCP clients as `skill://fdic-banks-guide/SKILL.md` and shipped in the npm package, Docker image, and `.mcpb` bundle
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the hosted instance, no install:
 
-A public instance is available at `https://fdic-banks.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "fdic-banks-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://fdic-banks.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http fdic-banks-mcp-server https://fdic-banks.caseyjhand.com/mcp
 ```
 
 Every caller of the hosted instance shares one FDIC request pacer and one dataframe workspace, so `fdic_dataframe_describe` takes a table's exact name there; listing is off.
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file. No API key is needed.
-
-```json
-{
-  "mcpServers": {
-    "fdic-banks-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/fdic-banks-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+```sh
+claude mcp add fdic-banks-mcp-server -- npx -y @cyanheads/fdic-banks-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "fdic-banks-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/fdic-banks-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/fdic-banks-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "fdic-banks-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/fdic-banks-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- No account or API key: the [FDIC BankFind Suite API](https://api.fdic.gov/banks/docs/) is public.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/fdic-banks-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd fdic-banks-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# every variable is optional; edit .env to override a default
-```
+No API key or account is needed: the [FDIC BankFind Suite API](https://api.fdic.gov/banks/docs/) is public. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -271,7 +202,7 @@ cp .env.example .env
 | `FDIC_PANEL_MAX_ROWS` | Row cap for one `fdic_query_financials` panel (1,000–200,000); the newest quarters are kept when it binds. | `50000` |
 | `FDIC_DATASET_TTL_SECONDS` | Lifetime of each staged dataframe, in seconds (minimum 60). | `86400` |
 | `FDIC_DATAFRAME_DROP_ENABLED` | Set `true` to enable `fdic_dataframe_drop`. | `false` |
-| `CANVAS_PROVIDER_TYPE` | Dataframe engine: `duckdb`, or `none` to turn staging and the dataframe tools off. The server sets `duckdb` when unset. | `duckdb` |
+| `CANVAS_PROVIDER_TYPE` | Dataframe engine: `duckdb`, or `none` to turn staging and the dataframe tools off. The server sets `duckdb` when unset or empty; the Claude Desktop bundle sets `none`. | `duckdb` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
@@ -287,23 +218,42 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-- **Build and run the production version**:
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/fdic-banks-mcp-server.git
+  cd fdic-banks-mcp-server && bun install
+  cp .env.example .env   # every variable is optional; edit to override a default
+  ```
+
+- **Build and run the production version:**
 
   ```sh
   # One-time build
   bun run rebuild
 
   # Run the built server
-  bun run start:http
+  bun run start:http   # http://localhost:3010/mcp
   # or
   bun run start:stdio
   ```
 
-- **Run checks and tests**:
+- **Run checks and tests:**
+
   ```sh
   bun run devcheck  # Lints, formats, type-checks, and more
   bun run test      # Runs the test suite
   ```
+
+### Docker
+
+```sh
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/fdic-banks-mcp-server:latest
+```
+
+The image defaults to HTTP transport on port 3010, stateless session mode, and logs to `/var/log/fdic-banks-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/fdic-banks-mcp-server:latest"]`.
 
 ## Project structure
 
@@ -311,7 +261,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 |:---|:---|
 | `src/index.ts` | `createApp()` entry point: registers the tools, sets the server instructions, and starts the FDIC service and canvas bridge. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`), shared input schemas, and markdown helpers. Ten tools. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`), shared input schemas, and markdown helpers. Eleven tools. |
 | `src/services/fdic` | FDIC BankFind client (request pacer, response cache, query builder, normalization), the metric catalog, and the reference tables. |
 | `src/services/canvas-bridge` | Adapter to the framework's DataCanvas: `df_<id>` table names, per-table TTL, and provenance. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |

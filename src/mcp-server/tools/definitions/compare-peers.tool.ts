@@ -503,7 +503,7 @@ export const comparePeersTool = tool('fdic_compare_peers', {
       const fmt = (v: number | null) => metricValue(v, c.unit);
       const rank = c.rank === null ? '—' : `${c.rank} of ${num(c.rank_of)}`;
       lines.push(
-        `| ${cell(c.metric)} | ${cell(c.field)} | ${c.unit} | ${c.basis} | ${fmt(c.value)} | ${fmt(c.peer_median)} | ${fmt(c.peer_p25)} | ${fmt(c.peer_p75)} | ${fmt(c.peer_min)} | ${fmt(c.peer_max)} | ${num(c.percentile, 1)} | ${rank} | ${num(c.peer_count_with_value)} |`,
+        `| ${cell(c.metric)} | ${cell(c.field)} | ${c.unit} | ${c.basis} | ${fmt(c.value)} | ${fmt(c.peer_median)} | ${fmt(c.peer_p25)} | ${fmt(c.peer_p75)} | ${fmt(c.peer_min)} | ${fmt(c.peer_max)} | ${num(c.percentile)} | ${rank} | ${num(c.peer_count_with_value)} |`,
       );
     }
     lines.push(

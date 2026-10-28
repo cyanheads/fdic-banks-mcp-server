@@ -4,6 +4,7 @@
  * @module services/fdic/types
  */
 
+import type { EventType, HistoryAttribute, HistoryRole } from './change-codes.js';
 import type { FailureMethodCode } from './failure-methods.js';
 import type { MetricName } from './metric-catalog.js';
 import type { StateCode } from './us-states.js';
@@ -190,4 +191,29 @@ export interface BranchRecord {
 export interface SodBucket {
   branchCount: number;
   deposits: number;
+}
+
+/** A `/history` row with the keys every row carries, checked when it is read. */
+export interface HistoryRow {
+  changeCode: number;
+  /** `CHANGECODE_DESC`, verbatim. */
+  changeDescription: string;
+  data: Record<string, unknown>;
+  /** `EFFDATE` as ISO `YYYY-MM-DD`. */
+  effectiveDate: string;
+  /** Row `ID`, unique across the index. */
+  id: string;
+}
+
+/** One structure-change event in an institution's history. */
+export interface HistoryEvent {
+  branch?: { address?: string; city?: string; name?: string; number?: number; state?: string };
+  change_code: number;
+  change_description: string;
+  changes?: Partial<Record<HistoryAttribute, { from: string; to: string }>>;
+  counterparty?: { cert?: number; name?: string };
+  effective_date: string;
+  event_type: EventType;
+  role: HistoryRole;
+  transaction_number?: number;
 }

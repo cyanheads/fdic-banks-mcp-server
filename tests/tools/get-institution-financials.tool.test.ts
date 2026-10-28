@@ -306,7 +306,7 @@ describe('both surfaces through the production contract', () => {
     withProfile();
     withHistory([
       healthRow(CERT, '20260630', { IDT1CER: 0 }),
-      healthRow(CERT, '20260331', { ROAQ: -0.25 }),
+      healthRow(CERT, '20260331', { ROAQ: -0.9569929993881674 }),
     ]);
     const { text } = await run({
       cert: CERT,
@@ -318,7 +318,9 @@ describe('both surfaces through the production contract', () => {
     expect(text).toContain('last report 2026-06-30');
     expect(text).toContain('| Report date | total_assets | roa | cet1_ratio | employees |');
     expect(text).toContain('| 2026-06-30 | 2,456,123 | 1.16% | — | — |');
-    expect(text).toContain('| 2026-03-31 | 2,456,123 | -0.25% | 13.4% | — |');
+    expect(text.split('\n')).toContain(
+      '| 2026-03-31 | 2,456,123 | -0.9569929993881674% | 13.4% | — |',
+    );
     expect(text).toContain('- roa: field ROAQ · unit percent · basis quarter_annualized');
     expect(text).toContain(
       `- cet1_ratio: field IDT1CER · unit percent · basis point_in_time — ${ZERO_UNREPORTED_NOTE}`,

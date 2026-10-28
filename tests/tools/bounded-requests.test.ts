@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { comparePeersTool } from '@/mcp-server/tools/definitions/compare-peers.tool.js';
 import { getDepositsTool } from '@/mcp-server/tools/definitions/get-deposits.tool.js';
 import { getInstitutionFinancialsTool } from '@/mcp-server/tools/definitions/get-institution-financials.tool.js';
+import { getInstitutionHistoryTool } from '@/mcp-server/tools/definitions/get-institution-history.tool.js';
 import { queryFinancialsTool } from '@/mcp-server/tools/definitions/query-financials.tool.js';
 import { searchFailuresTool } from '@/mcp-server/tools/definitions/search-failures.tool.js';
 import { searchInstitutionsTool } from '@/mcp-server/tools/definitions/search-institutions.tool.js';
@@ -22,6 +23,7 @@ describe('selection defaults', () => {
       runToolContract(searchFailuresTool, { methods: [] }),
       runToolContract(queryFinancialsTool, { certs: [] }),
       runToolContract(comparePeersTool, { cert: 3510, peer_certs: [] }),
+      runToolContract(getInstitutionHistoryTool, { cert: 3510, event_types: [] }),
     ]);
     for (const result of results) {
       expect(toolError(result)).toMatchObject({ data: { reason: 'invalid_arguments' } });
@@ -49,6 +51,13 @@ describe('selection defaults', () => {
     ).toBe(false);
     expect(queryFinancialsTool.input.safeParse({ limit: -1 }).success).toBe(false);
     expect(getDepositsTool.input.safeParse({ limit: 1.5 }).success).toBe(false);
+    expect(getInstitutionHistoryTool.input.safeParse({ cert: 1, limit: 0 }).success).toBe(false);
+    expect(
+      getInstitutionHistoryTool.input.safeParse({
+        cert: 1,
+        event_types: Array(1001).fill('merger'),
+      }).success,
+    ).toBe(false);
   });
   it('accepts oversized reads up to hard safety ceilings', () => {
     expect(
@@ -78,6 +87,10 @@ describe('selection defaults', () => {
       }).success,
     ).toBe(true);
     expect(getDepositsTool.input.safeParse({ cert: 3510, limit: 201 }).success).toBe(true);
+    expect(
+      getInstitutionHistoryTool.input.safeParse({ cert: 3510, limit: 1_000_000, offset: 1_000_000 })
+        .success,
+    ).toBe(true);
   });
   it('rejects explicitly empty selections before any request', () => {
     for (const [tool, input] of [
@@ -87,6 +100,7 @@ describe('selection defaults', () => {
       [searchFailuresTool, { methods: [] }],
       [queryFinancialsTool, { certs: [] }],
       [comparePeersTool, { cert: 3510, peer_certs: [] }],
+      [getInstitutionHistoryTool, { cert: 3510, event_types: [] }],
     ] as const) {
       expect(tool.input.safeParse(input).success).toBe(false);
     }
@@ -98,5 +112,6 @@ describe('selection defaults', () => {
       [],
     );
     expect(comparePeersTool.input.parse({ cert: 3510, metrics: [] }).metrics).toEqual([]);
+    expect(getInstitutionHistoryTool.input.parse({ cert: 3510 }).event_types).toBeUndefined();
   });
 });

@@ -18,7 +18,7 @@ import {
   initCanvasBridge,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { createDuckdbCanvas, tenantSession } from '../helpers/canvas.js';
-import { contractRecovery, structured, textOf, toolError } from '../helpers/tool-results.js';
+import { readMarkdownText, structured, textOf, toolError } from '../helpers/tool-results.js';
 
 const tool = dataframeDropTool;
 
@@ -36,16 +36,16 @@ afterEach(async () => {
 });
 
 describe('fdic_dataframe_drop', () => {
-  it('fails canvas_unavailable with its contract recovery when the canvas is off', async () => {
+  it('fails canvas_unavailable saying nothing is staged and pointing at offset pages, when the canvas is off', async () => {
     initCanvasBridge(undefined);
     const result = await runToolContract(tool, { name: 'df_AB12C_3DE45' });
+    const hint =
+      'Dataframes are off in this deployment, so nothing is staged to drop; fdic_query_financials and fdic_get_deposits return every row through offset and next_offset pages. A self-hosted server turns dataframes on with CANVAS_PROVIDER_TYPE=duckdb.';
     expect(toolError(result)).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
-      data: {
-        reason: 'canvas_unavailable',
-        recovery: { hint: contractRecovery(tool, 'canvas_unavailable') },
-      },
+      data: { reason: 'canvas_unavailable', recovery: { hint } },
     });
+    expect(readMarkdownText(textOf(result)).split('\n')).toContain(`Recovery: ${hint}`);
   });
 
   it('reports a name that is not staged as dropped false, on both surfaces', async () => {

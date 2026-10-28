@@ -68,6 +68,11 @@ export function and(...clauses: (Clause | undefined)[]): Clause | undefined {
   return present.length ? (present.join(' AND ') as Clause) : undefined;
 }
 
+/** `(a OR b …)`, parenthesized so it composes under {@link and}; one clause stands alone. */
+export function or(first: Clause, ...rest: Clause[]): Clause {
+  return rest.length ? (`(${[first, ...rest].join(' OR ')})` as Clause) : first;
+}
+
 // ---------------------------------------------------------------------------
 // Case handling
 // ---------------------------------------------------------------------------

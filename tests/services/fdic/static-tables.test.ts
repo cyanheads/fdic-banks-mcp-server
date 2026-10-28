@@ -1,12 +1,14 @@
 /**
  * @fileoverview Tests for the static vocabulary modules: metric catalog, state
- * table, asset bands, bank classes, failure methods, insurance funds, coverage.
+ * table, asset bands, bank classes, failure methods, insurance funds, coverage,
+ * and the `/history` change codes.
  * @module tests/services/fdic/static-tables.test
  */
 
 import { describe, expect, it } from 'vitest';
 import { ASSET_BAND_CODES, assetBand, assetBandFor } from '@/services/fdic/asset-bands.js';
 import { BANK_CLASS_CODES, bankClassLabel } from '@/services/fdic/bank-classes.js';
+import { CHANGE_CODES, changeCode } from '@/services/fdic/change-codes.js';
 import { COVERAGE } from '@/services/fdic/coverage.js';
 import { FAILURE_METHOD_CODES, failureMethodLabel } from '@/services/fdic/failure-methods.js';
 import { INSURANCE_FUNDS } from '@/services/fdic/insurance-funds.js';
@@ -191,7 +193,63 @@ describe('code labels', () => {
       ['financials', '1984Q1 (1984-03-31)'],
       ['summary_of_deposits', '1994'],
       ['failures', '1934'],
+      [
+        'history',
+        '1969 for mergers and 1970 for failures; founding records carry dates back to 1782',
+      ],
       ['institutions', '1934'],
     ]);
+  });
+});
+
+describe('structure-change codes', () => {
+  it('holds the 41 codes of the live index, unique, ascending, each with a label', () => {
+    const codes = CHANGE_CODES.map((c) => c.code);
+    expect(codes).toHaveLength(41);
+    expect(new Set(codes).size).toBe(41);
+    expect(codes).toEqual(codes.toSorted((a, b) => a - b));
+    for (const c of CHANGE_CODES) expect(c.label.trim()).not.toBe('');
+  });
+
+  it('maps codes to event types as the history tool classifies them', () => {
+    const byType = Object.groupBy(CHANGE_CODES, (c) => c.eventType);
+    const codesOf = (type: string) =>
+      (byType[type as keyof typeof byType] ?? []).map((c) => c.code);
+    expect(codesOf('opening')).toEqual([1, 110]);
+    expect(codesOf('merger')).toEqual([221, 222, 223, 224, 225, 810]);
+    expect(codesOf('failure_or_assistance')).toEqual([
+      211, 213, 215, 216, 217, 230, 235, 350, 360, 811, 812, 830,
+    ]);
+    expect(codesOf('branch_purchase')).toEqual([712]);
+    expect(codesOf('name_change')).toEqual([510]);
+    expect(codesOf('relocation')).toEqual([520]);
+    expect(codesOf('closing')).toEqual([240, 260]);
+    expect(codesOf('charter_change')).toEqual([
+      150, 310, 320, 340, 410, 420, 430, 440, 470, 610, 820,
+    ]);
+    expect(codesOf('branch')).toEqual([711, 713, 721, 722, 724]);
+    expect(codesOf('other')).toEqual([]);
+  });
+
+  it('records 520 and 712 at both levels, the branch codes at branch level, the rest at institution level', () => {
+    const levels = new Map(CHANGE_CODES.map((c) => [c.code, c.level]));
+    expect([...levels].filter(([, level]) => level === 'both').map(([code]) => code)).toEqual([
+      520, 712,
+    ]);
+    expect([...levels].filter(([, level]) => level === 'branch').map(([code]) => code)).toEqual([
+      711, 713, 721, 722, 724,
+    ]);
+  });
+
+  it('marks the outgoing side (211–225) and the survivor side (810–812) of an exit', () => {
+    const side = (s: string) => CHANGE_CODES.filter((c) => c.side === s).map((c) => c.code);
+    expect(side('outgoing')).toEqual([211, 213, 215, 216, 217, 221, 222, 223, 224, 225]);
+    expect(side('survivor')).toEqual([810, 811, 812]);
+  });
+
+  it('keeps FDIC labels verbatim and finds an entry by code, leaving a new code unmapped', () => {
+    expect(changeCode(221)?.label).toBe('Absorbtion - Without Assistance');
+    expect(changeCode(223)?.label).toBe('Merger -Without Assistance');
+    expect(changeCode(999)).toBeUndefined();
   });
 });

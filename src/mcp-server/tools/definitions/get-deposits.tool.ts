@@ -3,7 +3,8 @@
  * an institution's branches and per-state market share, a geography's deposit
  * market ranked by institution with HHI, or one institution's position within one
  * market. Rankings come from every aggregation bucket and are computed locally;
- * a branch list or ranking larger than the preview is staged as a dataframe.
+ * branch lists and rankings are returned a page at a time by offset, and the first
+ * page stages a collection larger than itself as a dataframe.
  * @module mcp-server/tools/definitions/get-deposits
  */
 
@@ -66,7 +67,7 @@ const pct = (value: number | null) => (value === null ? '—' : `${num(value)}%`
 export const getDepositsTool = tool('fdic_get_deposits', {
   title: 'Get Summary of Deposits branches and market share',
   description:
-    "Get Summary of Deposits data (branch-level domestic deposits, annual as of June 30, 1994 onward). With cert only: the institution's branches and its deposit market share in each state where it has offices. With a geography (state, county, city, ZIP, or MSA code): every institution in that market ranked by deposits, with market share and the Herfindahl-Hirschman index. With both: the institution's branches in that market and its rank and share there. Defaults to the latest survey year. Dollar amounts are in thousands.",
+    "Get Summary of Deposits data (branch-level domestic deposits, annual as of June 30, 1994 onward). With cert only: the institution's branches and its deposit market share in each state where it has offices. With a geography (state, county, city, ZIP, or MSA code): every institution in that market ranked by deposits, with market share and the Herfindahl-Hirschman index. With both: the institution's branches in that market and its rank and share there. Branches and rankings come a page at a time, continued with offset; at offset 0 a set larger than the page is also staged as a dataframe for fdic_dataframe_query. Defaults to the latest survey year. Dollar amounts are in thousands.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -95,13 +96,16 @@ export const getDepositsTool = tool('fdic_get_deposits', {
         )
         .optional(),
     ).describe(
-      'Five-digit CBSA (metropolitan area) code, 10180–49740; branch rows from a state-level call carry msa_code values to reuse. Non-metropolitan branches have no code.',
+      'Five-digit CBSA (metropolitan area) code, 10180–49740; branch rows (returned when cert is given) carry msa_code values to reuse. Non-metropolitan branches have no code.',
     ),
     year: blankAsUnset(z.number().int().min(1994).optional()).describe(
       'Survey year (deposits as of June 30), 1994 on. Omit for the latest survey.',
     ),
     limit: blankAsUnset(z.number().int().min(1).default(25)).describe(
-      'Positive inline preview count, bounded by the already-fetched branches or ranking. A larger set is staged whole as a dataframe when this deployment stages dataframes.',
+      'Positive count of rows per page, sliced from the already-fetched branches or ranking at offset. At offset 0 a larger set is also staged whole as a dataframe when this deployment stages dataframes.',
+    ),
+    offset: blankAsUnset(z.number().int().min(0).default(0)).describe(
+      'Branches or ranked institutions to skip; pass next_offset from the previous page. Only offset 0 stages a dataframe.',
     ),
   }),
 
@@ -208,7 +212,9 @@ export const getDepositsTool = tool('fdic_get_deposits', {
           .describe('One institution in the market.'),
       )
       .optional()
-      .describe('Market mode: institutions ranked by deposits (preview).'),
+      .describe(
+        'Market mode: one page of the institutions ranked by deposits (ties by CERT), starting at offset.',
+      ),
     branches: z
       .array(
         z
@@ -250,11 +256,18 @@ export const getDepositsTool = tool('fdic_get_deposits', {
           .describe('One branch; an optional field is absent when FDIC holds no value for it.'),
       )
       .optional()
-      .describe('Institution modes: branches in scope, main office first (preview).'),
+      .describe(
+        'Institution modes: one page of the branches in scope by branch number (main office first), starting at offset.',
+      ),
     total_rows: z
       .number()
       .int()
       .describe('Full count of the branches (institution modes) or ranked institutions (market).'),
+    next_offset: z
+      .number()
+      .int()
+      .optional()
+      .describe('Offset of the next page; present while rows remain past this page.'),
     dataset: z
       .object({
         name: z.string().describe('Dataframe name for fdic_dataframe_query.'),
@@ -263,7 +276,7 @@ export const getDepositsTool = tool('fdic_get_deposits', {
       })
       .optional()
       .describe(
-        'The staged full collection; present only when it exceeded the preview and this deployment staged it as a dataframe.',
+        'The staged full collection; present only at offset 0 when it exceeded limit and this deployment staged it as a dataframe.',
       ),
     data_as_of: z
       .string()
@@ -274,13 +287,15 @@ export const getDepositsTool = tool('fdic_get_deposits', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when nothing matched, or where the full collection is staged.'),
+      .describe(
+        'Guidance when nothing matched, more pages remain, the page is past the end, or where the full collection is staged.',
+      ),
     truncated: z
       .boolean()
       .optional()
-      .describe('True when the preview holds fewer rows than total_rows.'),
-    shown: z.number().optional().describe('Rows in the preview.'),
-    cap: z.number().optional().describe('The limit applied to the preview.'),
+      .describe('True when rows remain past this page (next_offset is set).'),
+    shown: z.number().optional().describe('Rows on this page.'),
+    cap: z.number().optional().describe('The limit applied to this page.'),
   },
 
   errors: [
@@ -383,9 +398,16 @@ export const getDepositsTool = tool('fdic_get_deposits', {
     const bridge = getCanvasBridge();
     const queryParams: Record<string, unknown> = { ...input };
 
-    /** Stages the branch list when it exceeds the preview. */
+    /**
+     * Only the first page stages: a later page re-fetches the same collection, and
+     * staging it again would mint a table per page.
+     */
+    const firstPage = input.offset === 0;
+    const pageOf = <T>(rows: readonly T[]) => rows.slice(input.offset, input.offset + input.limit);
+
+    /** Stages the branch list when it exceeds the first page. */
     const stageBranches = (cert: number, name: string, branches: readonly BranchRecord[]) =>
-      bridge && branches.length > input.limit
+      bridge && firstPage && branches.length > input.limit
         ? bridge.stage(ctx, {
             sourceTool: 'fdic_get_deposits',
             queryParams,
@@ -492,7 +514,7 @@ export const getDepositsTool = tool('fdic_get_deposits', {
           branch_count: found.rows.length,
         };
       }
-      branches = found.rows.slice(0, input.limit);
+      branches = pageOf(found.rows);
       totalRows = found.rows.length;
       dataset = await stageBranches(cert, name, found.rows);
     } else if (input.cert !== undefined && geography) {
@@ -522,7 +544,7 @@ export const getDepositsTool = tool('fdic_get_deposits', {
           branch_count: found.rows.length,
         };
       }
-      branches = found.rows.slice(0, input.limit);
+      branches = pageOf(found.rows);
       totalRows = found.rows.length;
       dataset = await stageBranches(cert, name, found.rows);
     } else {
@@ -535,16 +557,16 @@ export const getDepositsTool = tool('fdic_get_deposits', {
       const ranked = rankMarket(marketBuckets.buckets);
       market = ranked.market;
       totalRows = ranked.ranking.length;
-      const staging = bridge !== undefined && ranked.ranking.length > input.limit;
-      const preview = ranked.ranking.slice(0, input.limit);
+      const staging = bridge !== undefined && firstPage && ranked.ranking.length > input.limit;
+      const page = pageOf(ranked.ranking);
       const names = staging
         ? await service.institutionDirectory(ctx, budget)
         : await service.institutionNames(
-            preview.map((row) => row.cert),
+            page.map((row) => row.cert),
             ctx,
             budget,
           );
-      institutions = preview.map((row) => {
+      institutions = page.map((row) => {
         const name = names.get(row.cert);
         return name === undefined ? row : { ...row, name };
       });
@@ -580,6 +602,9 @@ export const getDepositsTool = tool('fdic_get_deposits', {
     }
 
     const shown = branches?.length ?? institutions?.length ?? 0;
+    const end = input.offset + shown;
+    const hasMore = end < totalRows;
+    const what = institutions ? 'ranked institutions' : 'branches';
     if (totalRows === 0) {
       const fragments: string[] = [];
       const marketEmpty = market === undefined || market.institution_count === 0;
@@ -599,7 +624,7 @@ export const getDepositsTool = tool('fdic_get_deposits', {
       }
       if (marketEmpty && input.msa_code) {
         fragments.push(
-          'msa_code is a 5-digit CBSA code; branch rows from a state-level call carry msa_code values to reuse.',
+          'msa_code is a 5-digit CBSA code; branch rows (returned when cert is given) carry msa_code values to reuse.',
         );
       }
       if (input.year !== undefined) {
@@ -608,20 +633,26 @@ export const getDepositsTool = tool('fdic_get_deposits', {
       ctx.enrich.notice(
         fragments.length ? fragments.join(' ') : `No Summary of Deposits rows matched in ${year}.`,
       );
-    } else if (totalRows > shown) {
-      const what = institutions ? 'ranked institutions' : 'branches';
+    } else if (hasMore) {
+      const paging = `Showing ${what} ${input.offset + 1}–${end} of ${totalRows}; pass offset ${end} for the next page.`;
       ctx.enrich.truncated({
         shown,
         cap: input.limit,
-        guidance: `Showing ${shown} of ${totalRows} ${what}. ${
-          dataset
-            ? stagedNotice(dataset)
-            : 'Raise limit or narrow the geography to see the rest inline.'
-        }`,
+        guidance: dataset ? `${paging} ${stagedNotice(dataset)}` : paging,
       });
+    } else if (shown === 0) {
+      ctx.enrich.notice(
+        `offset ${input.offset} is past the last of ${totalRows} ${what}; lower offset or omit it.`,
+      );
     }
 
-    ctx.log.info('Summary of Deposits', { mode, year, totalRows, staged: dataset?.name });
+    ctx.log.info('Summary of Deposits', {
+      mode,
+      year,
+      totalRows,
+      offset: input.offset,
+      staged: dataset?.name,
+    });
 
     return {
       mode,
@@ -645,6 +676,7 @@ export const getDepositsTool = tool('fdic_get_deposits', {
       ...(institutions ? { institutions } : {}),
       ...(branches ? { branches } : {}),
       total_rows: totalRows,
+      ...(hasMore ? { next_offset: end } : {}),
       ...(dataset ? { dataset } : {}),
       data_as_of: dataAsOf,
     };
@@ -655,6 +687,7 @@ export const getDepositsTool = tool('fdic_get_deposits', {
       `## Summary of Deposits ${result.year} — ${result.mode.replace(/_/g, ' ')} view (mode ${result.mode})`,
       `Survey year ${result.year}${result.year_defaulted ? ' (latest survey; year defaulted)' : ''}. Deposits are domestic branch deposits as of June 30, in thousands of US dollars. Data as of ${result.data_as_of}. Total rows: ${num(result.total_rows)}.`,
     ];
+    if (result.next_offset !== undefined) lines.push(`Next page: offset ${result.next_offset}.`);
     const g = result.geography;
     if (g) {
       const parts = [
@@ -681,7 +714,7 @@ export const getDepositsTool = tool('fdic_get_deposits', {
     if (result.market) {
       const m = result.market;
       lines.push(
-        `**Market:** deposits ${num(m.deposits)} · ${num(m.institution_count)} institutions · ${num(m.branch_count)} branches · HHI ${m.hhi === null ? '— (no deposits)' : num(m.hhi, 0)}`,
+        `**Market:** deposits ${num(m.deposits)} · ${num(m.institution_count)} institutions · ${num(m.branch_count)} branches · HHI ${m.hhi === null ? '— (no deposits)' : num(m.hhi)}`,
       );
     }
     if (result.dataset) {

@@ -88,7 +88,7 @@ export const searchFailuresTool = tool('fdic_search_failures', {
       .max(1000)
       .optional()
       .describe(
-        'Nonempty selection of at most 1000 raw CERTs; deduplicated before querying the first 50. deferred_certs holds the rest for another call. Events before 1977 carry no CERT.',
+        'Nonempty selection of at most 1000 raw CERTs; deduplicated before querying the first 50. deferred_certs holds the rest for another call. Most events before 1977, and every one before 1970, carry no CERT.',
       ),
     state: stateInput(
       "Failed institution's headquarters state: two-letter code in any case or full name.",
@@ -139,7 +139,7 @@ export const searchFailuresTool = tool('fdic_search_failures', {
               .number()
               .int()
               .optional()
-              .describe('CERT of the failed institution; absent before 1977.'),
+              .describe('CERT of the failed institution; absent for most events before 1977.'),
             fin: z
               .string()
               .optional()

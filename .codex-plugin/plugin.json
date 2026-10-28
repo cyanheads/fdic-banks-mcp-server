@@ -1,7 +1,7 @@
 {
   "name": "fdic-banks-mcp-server",
   "version": "0.2.0",
-  "description": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share.",
+  "description": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, mergers, deposit share.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -30,8 +30,8 @@
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "fdic-banks-mcp-server",
-    "shortDescription": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share.",
-    "longDescription": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, deposit market share via MCP. Find any FDIC-insured bank or savings institution, including closed, merged, and failed ones; read its quarterly Call Report financials back to 1984; rank it against same-size peers; screen many banks across quarters; search failures and assistance transactions since 1934 with the FDIC's estimated losses; and map branch deposits and market share from the Summary of Deposits. Keyless FDIC BankFind Suite data; credit unions are not covered.",
+    "shortDescription": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, mergers, deposit share.",
+    "longDescription": "Search FDIC-insured banks, Call Report financials, peer rankings, failures, mergers, deposit share via MCP. Find any FDIC-insured bank or savings institution, including closed, merged, and failed ones; read its quarterly Call Report financials back to 1984; rank it against same-size peers; trace its mergers, renames, and charter changes; screen many banks across quarters; search failures and assistance transactions since 1934 with the FDIC's estimated losses; and map branch deposits and market share from the Summary of Deposits. Keyless FDIC BankFind Suite data; credit unions are not covered.",
     "developerName": "cyanheads",
     "category": "research",
     "capabilities": [

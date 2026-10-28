@@ -1,11 +1,13 @@
 /**
  * @fileoverview Row normalizers: coerce numeric strings, convert dates to ISO, drop
  * empty strings and FDIC's absence sentinels to absent, and null the ratios FDIC
- * reports as `0` when unreported.
+ * reports as `0` when unreported. `/history` rows become events: each exit's two
+ * rows paired into one, classified by role and counterparty, newest first.
  * @module services/fdic/normalize
  */
 
 import { bankClassLabel } from './bank-classes.js';
+import { changeCode, type EventType, type HistoryAttribute } from './change-codes.js';
 import { failureMethodLabel } from './failure-methods.js';
 import { METRIC_CATALOG, type MetricName } from './metric-catalog.js';
 import { usDateToIso } from './query-builder.js';
@@ -13,6 +15,8 @@ import type {
   BranchRecord,
   FailureRecord,
   FdicRow,
+  HistoryEvent,
+  HistoryRow,
   InstitutionRecord,
   MetricValues,
 } from './types.js';
@@ -156,6 +160,199 @@ export function normalizeBranch(row: FdicRow): BranchRecord {
     ...opt('latitude', num(d.SIMS_LATITUDE) ?? undefined),
     ...opt('longitude', num(d.SIMS_LONGITUDE) ?? undefined),
   };
+}
+
+/**
+ * A `/history` row with its ID, effective date (`YYYY-MM-DDT00:00:00` upstream),
+ * and change code; `undefined` when FDIC sent a row without one of them.
+ */
+export function historyRow(row: FdicRow): HistoryRow | undefined {
+  const d = row.data;
+  const id = str(d.ID);
+  const effectiveDate = /^\d{4}-\d{2}-\d{2}/.exec(str(d.EFFDATE) ?? '')?.[0];
+  const code = num(d.CHANGECODE);
+  const changeDescription = str(d.CHANGECODE_DESC);
+  if (!id || !effectiveDate || code === null || !changeDescription) return;
+  return { id, effectiveDate, changeCode: code, changeDescription, data: d };
+}
+
+/** History attributes and the `/history` fields holding their current value. */
+const INSTITUTION_ATTRIBUTE_FIELDS: readonly (readonly [HistoryAttribute, string])[] = [
+  ['name', 'INSTNAME'],
+  ['address', 'PADDR'],
+  ['city', 'PCITY'],
+  ['state', 'PSTALP'],
+  ['bank_class', 'CLASS'],
+  ['chartering_agency', 'CHARTAGENT'],
+  ['regulator', 'REGAGENT'],
+];
+
+const BRANCH_ATTRIBUTE_FIELDS: readonly (readonly [HistoryAttribute, string])[] = [
+  ['name', 'OFF_NAME'],
+  ['address', 'OFF_PADDR'],
+  ['city', 'OFF_PCITY'],
+  ['state', 'OFF_PSTALP'],
+];
+
+/** `CHANGECODE` of a purchase of branches between institutions. */
+const BRANCH_PURCHASE = 712;
+/** `CHANGECODE` of a certificate replaced by administrative order. */
+const CERT_REPLACED = 150;
+
+/** Each attribute whose former (`FRM_<field>`) and current values are both recorded and differ. */
+function changedAttributes(
+  d: Record<string, unknown>,
+  fields: readonly (readonly [HistoryAttribute, string])[],
+): HistoryEvent['changes'] {
+  const changes: NonNullable<HistoryEvent['changes']> = {};
+  for (const [attribute, field] of fields) {
+    const from = str(d[`FRM_${field}`]);
+    const to = str(d[field]);
+    if (from !== undefined && to !== undefined && from !== to) changes[attribute] = { from, to };
+  }
+  return Object.keys(changes).length ? changes : undefined;
+}
+
+/** The institution a `SUR_`, `OUT_`, `ACQ_`, or `FRM_` field group names. */
+function party(d: Record<string, unknown>, prefix: string): HistoryEvent['counterparty'] {
+  const cert = positive(d[`${prefix}_CERT`]);
+  const name = str(d[`${prefix}_INSTNAME`]);
+  return cert === undefined && name === undefined
+    ? undefined
+    : { ...opt('cert', cert), ...opt('name', name) };
+}
+
+/**
+ * One row per exit. FDIC records a merger, failure, or assisted takeover twice —
+ * an outgoing-side row (211–225) and a survivor-side row (810–812), both carrying
+ * the outgoing CERT in `OUT_CERT` — and a CERT's history request returns both.
+ * The rows are grouped by `OUT_CERT` and the outgoing-side row is kept: it alone
+ * says whether the exit was a failure, and a survivor's 810 row calls a
+ * failed-bank takeover an unassisted merger. An exit recorded on one side only
+ * keeps that row. Some survivor-side rows (810s from 1979–1991) carry no
+ * `OUT_CERT`; one pairs with the outgoing-side row of the same `TRANSNUM` whose
+ * `SUR_CERT` names it, and stands alone when no such row was returned.
+ */
+function oneRowPerExit(rows: readonly HistoryRow[]): HistoryRow[] {
+  /** `TRANSNUM:SUR_CERT` of each outgoing-side row → its `OUT_CERT`. */
+  const outgoingByTransaction = new Map<string, number>();
+  for (const row of rows) {
+    const outgoing = positive(row.data.OUT_CERT);
+    const transaction = positive(row.data.TRANSNUM);
+    const survivor = positive(row.data.SUR_CERT);
+    if (
+      changeCode(row.changeCode)?.side === 'outgoing' &&
+      outgoing !== undefined &&
+      transaction !== undefined &&
+      survivor !== undefined
+    ) {
+      outgoingByTransaction.set(`${transaction}:${survivor}`, outgoing);
+    }
+  }
+  const exits = new Map<number, HistoryRow>();
+  const rest: HistoryRow[] = [];
+  for (const row of rows) {
+    const side = changeCode(row.changeCode)?.side;
+    const outgoing =
+      positive(row.data.OUT_CERT) ??
+      (side === 'survivor'
+        ? outgoingByTransaction.get(`${positive(row.data.TRANSNUM)}:${positive(row.data.CERT)}`)
+        : undefined);
+    if (side === undefined || outgoing === undefined) {
+      rest.push(row);
+      continue;
+    }
+    const kept = exits.get(outgoing);
+    if (!kept || (side === 'outgoing' && changeCode(kept.changeCode)?.side === 'survivor')) {
+      exits.set(outgoing, row);
+    }
+  }
+  return [...rest, ...exits.values()];
+}
+
+/** An institution-level row as an event of `cert`'s history. */
+function institutionEvent(row: HistoryRow, cert: number): HistoryEvent {
+  const d = row.data;
+  const entry = changeCode(row.changeCode);
+  let role: HistoryEvent['role'] = 'subject';
+  let counterparty: HistoryEvent['counterparty'];
+  if (entry?.side) {
+    const outgoing = positive(d.OUT_CERT) === cert;
+    role = outgoing ? 'outgoing' : 'survivor';
+    counterparty = party(d, outgoing ? 'SUR' : 'OUT');
+  } else if (row.changeCode === BRANCH_PURCHASE) {
+    const buyer = positive(d.CERT) === cert;
+    role = buyer ? 'buyer' : 'seller';
+    counterparty = party(d, buyer ? 'OUT' : 'ACQ');
+  } else if (row.changeCode === CERT_REPLACED) {
+    counterparty = party(d, 'FRM');
+  }
+  return {
+    ...eventBase(row, entry?.eventType ?? 'other', role),
+    ...opt('counterparty', counterparty),
+    // On every other role the FRM_ fields describe the counterparty, not a prior state.
+    ...opt(
+      'changes',
+      role === 'subject' ? changedAttributes(d, INSTITUTION_ATTRIBUTE_FIELDS) : undefined,
+    ),
+    ...opt('transaction_number', positive(d.TRANSNUM)),
+  };
+}
+
+/** A branch-level row: always `branch`, with the office it concerns. */
+function branchEvent(row: HistoryRow): HistoryEvent {
+  const d = row.data;
+  const branch = {
+    ...opt('name', str(d.OFF_NAME)),
+    ...opt('number', num(d.OFF_NUM) ?? undefined),
+    ...opt('address', str(d.OFF_PADDR)),
+    ...opt('city', str(d.OFF_PCITY)),
+    ...opt('state', str(d.OFF_PSTALP)),
+  };
+  return {
+    ...eventBase(row, 'branch', 'subject'),
+    ...opt('changes', changedAttributes(d, BRANCH_ATTRIBUTE_FIELDS)),
+    ...opt('branch', Object.keys(branch).length ? branch : undefined),
+    ...opt('transaction_number', positive(d.TRANSNUM)),
+  };
+}
+
+function eventBase(row: HistoryRow, eventType: EventType, role: HistoryEvent['role']) {
+  return {
+    effective_date: row.effectiveDate,
+    event_type: eventType,
+    change_code: row.changeCode,
+    change_description: row.changeDescription,
+    role,
+  };
+}
+
+/** Newest first: effective date, then transaction number, then row ID, each descending. */
+function newestFirst(a: HistoryRow, b: HistoryRow): number {
+  if (a.effectiveDate !== b.effectiveDate) return a.effectiveDate < b.effectiveDate ? 1 : -1;
+  const byTransaction = (num(b.data.TRANSNUM) ?? 0) - (num(a.data.TRANSNUM) ?? 0);
+  if (byTransaction !== 0) return byTransaction;
+  return a.id === b.id ? 0 : a.id < b.id ? 1 : -1;
+}
+
+/**
+ * `cert`'s history from its institution-level rows (`ORG_ROLE_CDE:FI` matching
+ * `CERT`, `OUT_CERT`, or `SUR_CERT`) and branch-level rows, one event per exit,
+ * newest first.
+ */
+export function historyEvents(
+  cert: number,
+  institutionRows: readonly HistoryRow[],
+  branchRows: readonly HistoryRow[],
+): HistoryEvent[] {
+  const institution = oneRowPerExit(institutionRows).map((row) => ({
+    row,
+    event: institutionEvent(row, cert),
+  }));
+  const branch = branchRows.map((row) => ({ row, event: branchEvent(row) }));
+  return [...institution, ...branch]
+    .sort((a, b) => newestFirst(a.row, b.row))
+    .map(({ event }) => event);
 }
 
 export function normalizeFailure(row: FdicRow): FailureRecord {

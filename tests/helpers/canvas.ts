@@ -2,13 +2,15 @@
  * @fileoverview The DataCanvas boundary for tests: a real in-memory DuckDB
  * `DataCanvas` with its sweeper off and an injectable canvas lifetime, a minimal
  * `DataCanvas` double that records `registerTable` calls and fails on demand,
- * and tenant sessions — per-call contexts that share one tenant's `ctx.state`,
- * as successive requests from one tenant do in production.
+ * and tenant sessions — per-call contexts that share one tenant's store, each
+ * call's `ctx.state` bound to its own signal, as requests from one tenant are in
+ * production.
  * @module tests/helpers/canvas
  */
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { ContextState } from '@cyanheads/mcp-ts-core';
 import {
   CanvasRegistry,
   DataCanvas,
@@ -83,13 +85,32 @@ export function canvasDouble(
 }
 
 /**
- * Successive requests from one tenant: each call builds its own context (with
- * its own contract, signal, and log) over one shared `ctx.state`, which is where
- * the bridge keeps the tenant's canvas ID and dataframe provenance.
+ * Requests from one tenant, successive or concurrent: each call builds its own
+ * context (with its own contract, signal, and log) over one shared store, which
+ * is where the bridge keeps the tenant's canvas ID and dataframe provenance.
+ * Each call's `ctx.state` rejects with `AbortError` once that call's own signal
+ * aborts, as production binds every request's `ctx.state` to its signal.
  */
 export function tenantSession(tenantId = 'default') {
   const { state } = createMockContext({ tenantId });
   return <const TErrors extends readonly ErrorContract[] | undefined = undefined>(
     options: MockContextOptions<TErrors> = {},
-  ) => Object.assign(createMockContext<TErrors>({ ...options, tenantId }), { state });
+  ) => {
+    const ctx = createMockContext<TErrors>({ ...options, tenantId });
+    return Object.assign(ctx, { state: boundToSignal(state, ctx.signal) });
+  };
+}
+
+/** `state` behind a check of one call's signal before every operation. */
+function boundToSignal(state: ContextState, signal: AbortSignal): ContextState {
+  return new Proxy(state, {
+    get(target, key) {
+      const member: unknown = Reflect.get(target, key);
+      if (typeof member !== 'function') return member;
+      return async (...args: unknown[]) => {
+        signal.throwIfAborted();
+        return await member.apply(target, args);
+      };
+    },
+  });
 }

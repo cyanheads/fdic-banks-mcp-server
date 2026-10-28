@@ -1,13 +1,14 @@
 /**
  * @fileoverview fdic_list_reference — decode this server's vocabulary from the same
  * static tables the data tools read: metric catalog, bank classes, failure methods,
- * insurance funds, peer asset bands, and dataset coverage.
+ * structure-change codes, insurance funds, peer asset bands, and dataset coverage.
  * @module mcp-server/tools/definitions/list-reference
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { ASSET_BANDS } from '@/services/fdic/asset-bands.js';
 import { BANK_CLASS_CODES, BANK_CLASSES } from '@/services/fdic/bank-classes.js';
+import { CHANGE_CODE_LEVELS, CHANGE_CODES, EVENT_TYPES } from '@/services/fdic/change-codes.js';
 import { COVERAGE } from '@/services/fdic/coverage.js';
 import { FAILURE_METHOD_CODES, FAILURE_METHODS } from '@/services/fdic/failure-methods.js';
 import { INSURANCE_FUNDS } from '@/services/fdic/insurance-funds.js';
@@ -24,6 +25,7 @@ const TOPICS = [
   'metrics',
   'bank_classes',
   'failure_methods',
+  'change_codes',
   'insurance_funds',
   'peer_asset_bands',
   'coverage',
@@ -36,7 +38,7 @@ const EntrySchema = z
     code: z
       .string()
       .describe(
-        'The value to pass or read back: metric name, class code, method code, fund, band, or dataset.',
+        'The value to pass or read back: metric name, class code, method code, change code, fund, band, or dataset.',
       ),
     label: z.string().describe('What the code means.'),
     field: z
@@ -66,6 +68,18 @@ const EntrySchema = z
       .optional()
       .describe(
         'The one resolution type this method code occurs on; absent when it occurs on both (failure_methods).',
+      ),
+    event_type: z
+      .enum(EVENT_TYPES)
+      .optional()
+      .describe(
+        'Event type fdic_get_institution_history gives an institution-level row with this code; every branch-level row is branch (change_codes).',
+      ),
+    level: z
+      .enum(CHANGE_CODE_LEVELS)
+      .optional()
+      .describe(
+        'Whether FDIC records the code on institution-level rows, branch-level rows, or both (change_codes).',
       ),
     min_assets: z
       .number()
@@ -105,6 +119,13 @@ function entriesFor(topic: Topic): Entry[] {
         const { label, resolution } = FAILURE_METHODS[code];
         return { code, label, ...(resolution ? { resolution } : {}) };
       });
+    case 'change_codes':
+      return CHANGE_CODES.map(({ code, label, eventType, level }) => ({
+        code: String(code),
+        label,
+        event_type: eventType,
+        level,
+      }));
     case 'insurance_funds':
       return Object.entries(INSURANCE_FUNDS).map(([code, label]) => ({ code, label }));
     case 'peer_asset_bands':
@@ -135,14 +156,14 @@ function entriesFor(topic: Topic): Entry[] {
 export const listReferenceTool = tool('fdic_list_reference', {
   title: 'List FDIC reference vocabulary',
   description:
-    'List the vocabulary the other fdic_ tools accept and return: every financial metric name with its FDIC field, unit, and basis (single quarter, year-to-date, or point in time), bank charter classes, failure resolution methods, insurance funds, the asset bands fdic_compare_peers uses, and the years each dataset covers. Served from built-in tables; no request to FDIC.',
+    'List the vocabulary the other fdic_ tools accept and return: every financial metric name with its FDIC field, unit, and basis (single quarter, year-to-date, or point in time), bank charter classes, failure resolution methods, the structure-change codes fdic_get_institution_history reports and the event type each maps to, insurance funds, the asset bands fdic_compare_peers uses, and the years each dataset covers. Served from built-in tables; no request to FDIC.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
     topic: z
       .enum(TOPICS)
       .describe(
-        'Which table to list: metrics (names, FDIC fields, units, basis, default set), bank_classes, failure_methods, insurance_funds, peer_asset_bands, or coverage (years and cadence of each dataset).',
+        'Which table to list: metrics (names, FDIC fields, units, basis, default set), bank_classes, failure_methods, change_codes (FDIC structure-change codes with their event type and level), insurance_funds, peer_asset_bands, or coverage (years and cadence of each dataset).',
       ),
   }),
 
@@ -165,6 +186,8 @@ export const listReferenceTool = tool('fdic_list_reference', {
       if (e.in_default_set !== undefined)
         details.push(`in default set: ${e.in_default_set ? 'yes' : 'no'}`);
       if (e.resolution) details.push(`occurs on ${e.resolution} only`);
+      if (e.event_type) details.push(`event type ${e.event_type}`);
+      if (e.level) details.push(`level ${e.level}`);
       if (e.min_assets !== undefined) details.push(`min_assets ≥ ${num(e.min_assets)}`);
       if (e.max_assets !== undefined) details.push(`max_assets < ${num(e.max_assets)}`);
       if (e.starts) details.push(`starts ${e.starts}`);

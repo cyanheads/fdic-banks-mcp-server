@@ -1,5 +1,6 @@
 /**
- * @fileoverview Smoke check of the five Wave 1 tool definitions against the
+ * @fileoverview Smoke check of the Wave 1 tool definitions (plus the history tool
+ * built after them) against the
  * framework's definition linter (naming, describe-on-fields, format parity,
  * error-contract conformance). Each definition is imported from its own file.
  * @module tests/smoke/wave1-definitions.smoke.test
@@ -9,6 +10,7 @@ import { validateDefinitions } from '@cyanheads/mcp-ts-core/linter';
 import { describe, expect, it } from 'vitest';
 import { comparePeersTool } from '@/mcp-server/tools/definitions/compare-peers.tool.js';
 import { getInstitutionFinancialsTool } from '@/mcp-server/tools/definitions/get-institution-financials.tool.js';
+import { getInstitutionHistoryTool } from '@/mcp-server/tools/definitions/get-institution-history.tool.js';
 import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference.tool.js';
 import { searchFailuresTool } from '@/mcp-server/tools/definitions/search-failures.tool.js';
 import { searchInstitutionsTool } from '@/mcp-server/tools/definitions/search-institutions.tool.js';
@@ -16,6 +18,7 @@ import { searchInstitutionsTool } from '@/mcp-server/tools/definitions/search-in
 const WAVE_1 = [
   searchInstitutionsTool,
   getInstitutionFinancialsTool,
+  getInstitutionHistoryTool,
   comparePeersTool,
   searchFailuresTool,
   listReferenceTool,
@@ -26,6 +29,7 @@ describe('Wave 1 tool definitions', () => {
     expect(WAVE_1.map((t) => t.name)).toEqual([
       'fdic_search_institutions',
       'fdic_get_institution_financials',
+      'fdic_get_institution_history',
       'fdic_compare_peers',
       'fdic_search_failures',
       'fdic_list_reference',

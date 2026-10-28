@@ -14,6 +14,7 @@ import { dataframeDropTool } from './dataframe-drop.tool.js';
 import { dataframeQueryTool } from './dataframe-query.tool.js';
 import { getDepositsTool } from './get-deposits.tool.js';
 import { getInstitutionFinancialsTool } from './get-institution-financials.tool.js';
+import { getInstitutionHistoryTool } from './get-institution-history.tool.js';
 import { listReferenceTool } from './list-reference.tool.js';
 import { queryFinancialsTool } from './query-financials.tool.js';
 import { searchFailuresTool } from './search-failures.tool.js';
@@ -30,6 +31,7 @@ export function buildToolDefinitions(options: ToolDefinitionOptions) {
   return [
     searchInstitutionsTool,
     getInstitutionFinancialsTool,
+    getInstitutionHistoryTool,
     comparePeersTool,
     queryFinancialsTool,
     searchFailuresTool,

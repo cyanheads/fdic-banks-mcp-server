@@ -1,6 +1,6 @@
 # fdic-banks-mcp-server - Directory Structure
 
-Generated on: 2026-10-16 17:24:21
+Generated on: 2026-10-28 14:41:01
 
 ```text
 fdic-banks-mcp-server/
@@ -37,6 +37,8 @@ fdic-banks-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -134,6 +136,9 @@ fdic-banks-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── fdic-banks-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -146,6 +151,7 @@ fdic-banks-mcp-server/
 │   │       │   ├── dataframe-query.tool.ts
 │   │       │   ├── get-deposits.tool.ts
 │   │       │   ├── get-institution-financials.tool.ts
+│   │       │   ├── get-institution-history.tool.ts
 │   │       │   ├── index.ts
 │   │       │   ├── list-reference.tool.ts
 │   │       │   ├── query-financials.tool.ts
@@ -160,6 +166,7 @@ fdic-banks-mcp-server/
 │   │   └── fdic/
 │   │       ├── asset-bands.ts
 │   │       ├── bank-classes.ts
+│   │       ├── change-codes.ts
 │   │       ├── coverage.ts
 │   │       ├── failure-methods.ts
 │   │       ├── fdic-service.ts
@@ -180,6 +187,8 @@ fdic-banks-mcp-server/
 │   │   ├── canvas.ts
 │   │   ├── fake-fdic.ts
 │   │   └── tool-results.ts
+│   ├── scripts/
+│   │   └── agent-doc-entry.test.ts
 │   ├── services/
 │   │   ├── canvas-bridge/
 │   │   │   └── canvas-bridge.test.ts
@@ -203,6 +212,7 @@ fdic-banks-mcp-server/
 │   │   ├── error-severity.test.ts
 │   │   ├── get-deposits.tool.test.ts
 │   │   ├── get-institution-financials.tool.test.ts
+│   │   ├── get-institution-history.tool.test.ts
 │   │   ├── input-schemas.test.ts
 │   │   ├── list-reference.tool.test.ts
 │   │   ├── markdown.test.ts
@@ -226,7 +236,9 @@ fdic-banks-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

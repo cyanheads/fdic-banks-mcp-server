@@ -10,9 +10,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { blankAsUnset } from '../input-schemas.js';
-import { cell } from '../markdown.js';
+import { cell, inline } from '../markdown.js';
 
-/** A result value in one table cell. */
+/** A result value in one table cell: SQL NULL leaves it empty, and `cell()` renders `''` as `""`. */
 function valueCell(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string') return cell(value);
@@ -106,7 +106,7 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'DataCanvas is not configured in this deployment',
       recovery:
-        'Dataframes are off in this deployment; use the inline rows the fdic_ tools return, or ask the operator to set CANVAS_PROVIDER_TYPE=duckdb.',
+        'Dataframes are off in this deployment; page fdic_query_financials and fdic_get_deposits with offset and next_offset instead. A self-hosted server turns them on with CANVAS_PROVIDER_TYPE=duckdb.',
       severity: 'notice',
     },
     {
@@ -157,9 +157,9 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
     {
       reason: 'denied_function',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL calls a file-reading, external-data, engine-setting, or dynamic SQL function the read-only gate refuses',
+      when: 'The SQL calls a file-reading, external-data, engine-setting, or dynamic SQL function the read-only gate refuses, or names current_schema unqualified, which DuckDB reads as the current_schema() function',
       recovery:
-        'Remove the refused function and query only df_ tables named in a dataset field or by fdic_dataframe_describe.',
+        'Remove the refused function, or qualify a column named current_schema with its table (t.current_schema); query only df_ tables named in a dataset field or by fdic_dataframe_describe.',
       // Reaching past the staged tables: a modeled rejection, but worth an operator's eye.
       severity: 'warning',
       thrownBy: 'service',
@@ -283,7 +283,7 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
       `Requested row_limit ${result.requested_row_limit}; effective row_limit ${result.effective_row_limit}. Preview: requested ${result.requested_preview ?? 'default'}, effective ${result.effective_preview}.`,
     );
     if (result.rows.length === 0) {
-      lines.push('', `Columns: ${result.columns.map(cell).join(', ') || 'none'}`);
+      lines.push('', `Columns: ${result.columns.map(inline).join(', ') || 'none'}`);
       return [{ type: 'text', text: lines.join('\n') }];
     }
     lines.push('', `| ${result.columns.map(cell).join(' | ')} |`);

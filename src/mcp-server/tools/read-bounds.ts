@@ -36,8 +36,17 @@ export const metricSelectionFields = {
     .describe('Execution caps and how to retrieve deferred selections.'),
 };
 
+/**
+ * Authored guidance, so it renders as live Markdown; without a `render` the
+ * framework's generic trailer line shows it as a code span.
+ */
+const selectionNoticeTrailer = {
+  selection_notice: { render: (value: string) => value },
+};
+
 /** Human-readable lists for the content trailer. */
 export const certSelectionTrailer = {
+  ...selectionNoticeTrailer,
   processed_certs: {
     render: (values: number[]) => `Processed CERTs: ${values.join(', ') || 'none'}.`,
   },
@@ -51,6 +60,7 @@ export const certSelectionTrailer = {
 
 /** Metric projection rendering for content-only clients. */
 export const metricSelectionTrailer = {
+  ...selectionNoticeTrailer,
   processed_metrics: {
     render: (values: string[]) => `Processed metrics: ${values.join(', ') || 'none'}.`,
   },
