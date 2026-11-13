@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: fdic-banks-mcp-server
+abstract: "Search FDIC-insured banks, Call Report financials, peer rankings, failures, mergers, deposit share via MCP. STDIO or Streamable HTTP."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/fdic-banks-mcp-server"
+license: Apache-2.0
+doi: 10.5281/zenodo.24193461
+keywords:
+  - mcp
+  - model-context-protocol
+  - fdic
+  - bankfind
+  - banking
+  - bank-failures
+  - call-report
+  - bank-financials
+  - summary-of-deposits
+  - finance
