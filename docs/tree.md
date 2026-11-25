@@ -1,6 +1,6 @@
 # fdic-banks-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 17:19:33
+Generated on: 2026-11-25 10:11:22
 
 ```text
 fdic-banks-mcp-server/
@@ -27,6 +27,7 @@ fdic-banks-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -232,6 +233,7 @@ fdic-banks-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
