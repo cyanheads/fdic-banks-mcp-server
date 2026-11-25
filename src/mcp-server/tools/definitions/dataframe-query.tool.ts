@@ -176,8 +176,9 @@ export const dataframeQueryTool = tool('fdic_dataframe_query', {
     {
       reason: 'system_catalog_access',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL references a system catalog: information_schema, pg_catalog, sqlite_master, or a duckdb_*() function',
-      recovery: 'Query only df_ tables named in a dataset field or by fdic_dataframe_describe.',
+      when: 'The SQL names a system catalog (information_schema, pg_catalog, a duckdb_*() function, or a DuckDB metadata view such as duckdb_tables, pg_tables, or sqlite_master), including as a column, CTE, table, or subquery alias',
+      recovery:
+        'Query only df_ tables named in a dataset field or by fdic_dataframe_describe, and rename any alias spelled like a system catalog, such as pg_tables or duckdb_columns.',
       severity: 'warning',
       thrownBy: 'service',
     },

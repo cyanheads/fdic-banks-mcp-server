@@ -327,6 +327,20 @@ describe('SQL rejections', () => {
       'SELECT * FROM information_schema.tables',
       JsonRpcErrorCode.ValidationError,
     ],
+    ['system_catalog_access', 'SELECT 1 AS pg_tables', JsonRpcErrorCode.ValidationError],
+    ['system_catalog_access', 'SELECT 1 AS "SQLITE_SCHEMA"', JsonRpcErrorCode.ValidationError],
+    [
+      'system_catalog_access',
+      'WITH pg_class AS (SELECT 1 AS n) SELECT * FROM pg_class',
+      JsonRpcErrorCode.ValidationError,
+    ],
+    [
+      'system_catalog_access',
+      'SELECT t.n FROM (SELECT 1 AS n) duckdb_columns, (SELECT 1 AS n) t',
+      JsonRpcErrorCode.ValidationError,
+    ],
+    ['system_catalog_access', 'SELECT * FROM pg_am', JsonRpcErrorCode.ValidationError],
+    ['system_catalog_access', 'SELECT * FROM duckdb_tables', JsonRpcErrorCode.ValidationError],
   ])('rejects %s with this tool contract recovery: %s', async (reason, sql, code) => {
     const { result, text } = await run({ sql });
     expect(toolError(result)).toMatchObject({
@@ -335,6 +349,20 @@ describe('SQL rejections', () => {
     });
     expect(text).toContain(`reason ${reason}`);
     expect(readMarkdownText(text)).toContain(contractRecovery(tool, reason));
+  });
+
+  it('tells a caller whose alias is spelled like a metadata view to rename it, on both surfaces', async () => {
+    const { result, text } = await run({ sql: 'SELECT 1 AS pg_tables' });
+    const error = toolError(result);
+    expect(error.data?.reason).toBe('system_catalog_access');
+    expect(error.message).toContain('pg_tables');
+    expect(error.data?.recovery?.hint).toContain('rename any alias spelled like a system catalog');
+    expect(readMarkdownText(text)).toContain('rename any alias spelled like a system catalog');
+  });
+
+  it('answers a column alias that only starts like a metadata view', async () => {
+    const { result } = await run({ sql: 'SELECT 1 AS pg_total' });
+    expect(structured<Output>(result).rows).toEqual([{ pg_total: 1 }]);
   });
 
   it('says a missing df_ table may have been dropped to make room, on both surfaces', async () => {
