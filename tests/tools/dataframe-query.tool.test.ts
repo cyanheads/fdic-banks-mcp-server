@@ -321,7 +321,7 @@ describe('SQL rejections', () => {
     ['non_select_statement', 'DELETE FROM staging_scratch', JsonRpcErrorCode.ValidationError],
     ['multi_statement', 'SELECT 1; SELECT 2', JsonRpcErrorCode.ValidationError],
     ['denied_function', "SELECT * FROM read_csv('/etc/passwd')", JsonRpcErrorCode.ValidationError],
-    ['plan_operator_not_allowed', 'SELECT * FROM range(5)', JsonRpcErrorCode.ValidationError],
+    ['plan_operator_not_allowed', 'SHOW TABLES', JsonRpcErrorCode.ValidationError],
     [
       'system_catalog_access',
       'SELECT * FROM information_schema.tables',

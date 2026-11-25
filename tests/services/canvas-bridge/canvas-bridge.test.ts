@@ -678,9 +678,9 @@ describe('query', () => {
       rowCount: 3,
       truncated: false,
       columnSchema: [
-        { name: 'cert', type: 'INTEGER', nullable: true },
-        { name: 'roa_doubled', type: 'DOUBLE', nullable: true },
-        { name: 'name', type: 'VARCHAR', nullable: true },
+        { name: 'cert', type: 'INTEGER', engineType: 'INTEGER', nullable: true },
+        { name: 'roa_doubled', type: 'DOUBLE', engineType: 'DOUBLE', nullable: true },
+        { name: 'name', type: 'VARCHAR', engineType: 'VARCHAR', nullable: true },
       ],
     });
 
@@ -727,7 +727,7 @@ describe('query', () => {
     ['non_select_statement', 'DELETE FROM staging_scratch', JsonRpcErrorCode.ValidationError],
     ['multi_statement', 'SELECT 1; SELECT 2', JsonRpcErrorCode.ValidationError],
     ['denied_function', "SELECT * FROM read_csv('/etc/passwd')", JsonRpcErrorCode.ValidationError],
-    ['plan_operator_not_allowed', 'SELECT * FROM range(5)', JsonRpcErrorCode.ValidationError],
+    ['plan_operator_not_allowed', 'SHOW TABLES', JsonRpcErrorCode.ValidationError],
     [
       'system_catalog_access',
       'SELECT table_name FROM information_schema.tables',
