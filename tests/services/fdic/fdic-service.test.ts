@@ -16,6 +16,7 @@ import {
   JsonRpcErrorCode,
   McpError,
   rateLimited,
+  serviceUnavailable,
 } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
@@ -37,6 +38,7 @@ import {
   disposeFdicService,
   FdicService,
   getFdicService,
+  type InstitutionSearch,
   initFdicService,
 } from '@/services/fdic/fdic-service.js';
 import { HARBOR_BANK } from '../../fixtures/fdic-records.js';
@@ -48,6 +50,7 @@ import {
   HISTORY,
   INDEX,
   INVALID_DATE_400,
+  ScriptedSearch,
 } from '../../helpers/fake-fdic.js';
 import { contractRecovery, textOf, toolError } from '../../helpers/tool-results.js';
 
@@ -265,6 +268,202 @@ describe('in-flight dedupe', () => {
     expect(result.rows).toHaveLength(1);
     expect(fake.requests).toHaveLength(2);
   });
+});
+
+describe('relevance search reads', () => {
+  const rows = Array.from({ length: 10_010 }, (_, i) => ({ ...HARBOR_BANK, CERT: 100_000 + i }));
+  /** Order B moves the matches on either side of the 10,000-match seam across it. */
+  const otherWay = [...rows];
+  [otherWay[9_999], otherWay[10_000]] = [rows[10_000]!, rows[9_999]!];
+  const page = (offset: number, limit: number): InstitutionSearch => ({
+    name: 'harbor',
+    status: 'inactive',
+    sort: 'relevance',
+    offset,
+    limit,
+  });
+  const certsOf = (p: { rows: readonly { cert: number }[] }) => p.rows.map((row) => row.cert);
+  const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
+  /** A responder whose row reads wait for the caller's signal to abort, then reject with its reason. */
+  const hang = (request: FakeRequest) =>
+    new Promise<never>((_resolve, reject) => {
+      request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+    });
+
+  it('shares one block read between two first pages read at once, returning one order', async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const search = new ScriptedSearch(
+      [rows.slice(0, 30), rows.slice(0, 30).reverse()],
+      ({ n }) => n % 2,
+    );
+    const fake = new FakeFdic().on(
+      'institutions',
+      () => true,
+      async (request) => {
+        await gate;
+        return search.respond(request);
+      },
+    );
+    const service = serviceOver(fake);
+    const first = service.searchInstitutions(page(0, 10), toolCtx(), callBudget());
+    const second = service.searchInstitutions(page(0, 10), toolCtx(), callBudget());
+    release?.();
+    const [a, b] = await Promise.all([first, second]);
+    expect(certsOf(a)).toEqual(range(100_000, 10));
+    expect(certsOf(b)).toEqual(certsOf(a));
+    expect(search.reads(0)).toBe(1);
+  });
+
+  it('lets a page that joined another call’s block read finish when that caller cancels', async () => {
+    const search = new ScriptedSearch([rows.slice(0, 30)], () => 0);
+    let reads = 0;
+    const fake = new FakeFdic().on(
+      'institutions',
+      () => true,
+      (request) =>
+        request.params.limit !== '0' && reads++ === 0 ? hang(request) : search.respond(request),
+    );
+    const service = serviceOver(fake, { cacheTtlSeconds: 0 });
+    const originator = new AbortController();
+    const cancelled = service.searchInstitutions(
+      page(0, 10),
+      toolCtx(originator.signal),
+      callBudget(),
+    );
+    const live = service.searchInstitutions(page(0, 10), toolCtx(), callBudget());
+    await vi.waitFor(() => expect(reads).toBe(1));
+    originator.abort(new DOMException('caller went away', 'AbortError'));
+
+    await expect(cancelled).rejects.toThrow('caller went away');
+    expect(certsOf(await live)).toEqual(range(100_000, 10));
+    expect(reads).toBe(2);
+  });
+
+  it('keeps two calls that first read a block the other way at once in one order', async () => {
+    // The second block's first read comes back the other way; later reads alternate.
+    const search = new ScriptedSearch([rows, otherWay], ({ n, offset }) =>
+      offset === 10_000 ? (n + 1) % 2 : 0,
+    );
+    const fake = new FakeFdic().on('institutions', () => true, search.respond);
+    const service = serviceOver(fake);
+    await service.searchInstitutions(page(9_990, 10), toolCtx(), callBudget());
+
+    const [a, b] = await Promise.all([
+      service.searchInstitutions(page(10_000, 5), toolCtx(), callBudget()),
+      service.searchInstitutions(page(10_000, 5), toolCtx(), callBudget()),
+    ]);
+    expect(certsOf(a)).toEqual(range(110_000, 5));
+    expect(certsOf(b)).toEqual(certsOf(a));
+    expect([a.orderUnconfirmed, b.orderUnconfirmed]).toEqual([false, false]);
+    search.assertClean();
+  });
+
+  it('rejects, and sends nothing more, when the caller cancels while a block is read again', async () => {
+    const search = new ScriptedSearch([rows, otherWay], ({ offset }) =>
+      offset === 10_000 ? 1 : 0,
+    );
+    const fake = new FakeFdic().on(
+      'institutions',
+      () => true,
+      (request) =>
+        request.params.offset === '10000' && search.reads(10_000) >= 1
+          ? hang(request)
+          : search.respond(request),
+    );
+    const service = serviceOver(fake);
+    await service.searchInstitutions(page(9_990, 10), toolCtx(), callBudget());
+    const caller = new AbortController();
+    const pending = service.searchInstitutions(
+      page(10_000, 5),
+      toolCtx(caller.signal),
+      callBudget(),
+    );
+    await vi.waitFor(() =>
+      expect(fake.to('institutions').filter((r) => r.params.offset === '10000')).toHaveLength(2),
+    );
+    const sent = fake.requests.length;
+    caller.abort(new DOMException('caller went away', 'AbortError'));
+
+    await expect(pending).rejects.toThrow('caller went away');
+    expect(fake.requests).toHaveLength(sent);
+  });
+
+  it.each<[string, number, number[]]>([
+    ['keeps', 150, [100_002, 100_003, 100_004]],
+    ['forgets', 220, [100_027, 100_026, 100_025]],
+  ])(
+    '%s the order read first once %i searches of 10,000 matches were read after it: bounded by bytes',
+    async (_label, searches, certs) => {
+      const small = rows.slice(0, 30);
+      const harbor = new ScriptedSearch([small, [...small].reverse()], ({ n }) => n % 2);
+      const block = envelope(
+        'institutions',
+        Array.from({ length: 10_000 }, (_, i) => ({ CERT: 200_000 + i })),
+      );
+      // One body for every flood read, not a clone per request: nothing in the read path writes to rows.
+      const fake = new FakeFdic()
+        .on('institutions', (p) => p.search === 'NAME:harbor', harbor.respond)
+        .on(
+          'institutions',
+          () => true,
+          () => block,
+        );
+      const service = serviceOver(fake, { cacheTtlSeconds: 0 });
+
+      await service.searchInstitutions(page(0, 10), toolCtx(), callBudget());
+      for (let i = 0; i < searches; i++) {
+        await service.searchInstitutions(
+          { ...page(0, 1), name: `flood ${i}` },
+          toolCtx(),
+          callBudget(),
+        );
+      }
+      // The second read comes back reversed: put back in order while its record is kept.
+      const again = await service.searchInstitutions(page(2, 3), toolCtx(), callBudget());
+      expect(certsOf(again)).toEqual(certs);
+      expect(harbor.reads(0)).toBe(2);
+    },
+  );
+
+  it.each([0, 20])(
+    'sends nothing after a page at offset %i rejects, so no read outlives its call',
+    async (offset) => {
+      vi.useFakeTimers();
+      const fake = new FakeFdic()
+        .on(
+          'institutions',
+          (p) => (p.filters ?? '').includes('!('),
+          () => {
+            throw internalError('Rest tier unavailable in test.');
+          },
+        )
+        .on(
+          'institutions',
+          () => true,
+          () => {
+            throw serviceUnavailable('Fetch failed. Status: 503', { status: 503 });
+          },
+        );
+      const service = serviceOver(fake);
+      const query: InstitutionSearch = { ...page(offset, 20), status: 'any' };
+      let sentAtRejection = -1;
+      const settled = service.searchInstitutions(query, toolCtx(), callBudget()).then(
+        () => undefined,
+        (err: unknown) => {
+          sentAtRejection = fake.requests.length;
+          return err;
+        },
+      );
+      // Runs every backoff timer a read still alive after the rejection would wait on.
+      await vi.runAllTimersAsync();
+      expect(await settled).toMatchObject({ message: 'Rest tier unavailable in test.' });
+      expect(sentAtRejection).toBeGreaterThan(0);
+      expect(fake.requests).toHaveLength(sentAtRejection);
+    },
+  );
 });
 
 describe('envelope validation', () => {

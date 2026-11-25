@@ -4,7 +4,7 @@ description: Chain fdic_* tools through multi-step bank research — a failed or
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -45,7 +45,7 @@ A failure record names its acquirer by name, city, and state only. Resolve the a
 
 **Acquisition tree.** Resolve the acquirer, then call `fdic_get_institution_history` filtered to `merger` and `failure_or_assistance`. Keep role `survivor` events, and recurse into each counterparty CERT whose own history has absorptions. Effective dates order the tree; events sharing a transaction number belong to one deal, such as a merger and the rename that came with it.
 
-**Deposit share over time.** Call `fdic_get_deposits` for the same geography at the start year and the latest survey. Full-outer-join the two rankings on `cert`: a bank present only in the earlier year merged, closed, or left the market, and the history tool tells which and names any survivor. Filter to the banks the question covers before ranking the change.
+**Deposit share over time.** Call `fdic_get_deposits` for the same geography at the start year and the latest survey. Full-outer-join the two rankings on `cert`: a bank present only in the earlier year merged, closed, or left the market, and the history tool tells which and names any survivor. Filter to the banks the question covers before ranking the change. Connecticut's counties became planning regions in the 2023 survey (most of Hartford County's branches moved to Capitol), so a Connecticut county comparison across 2022 and 2023 breaks; compare that market by city or msa_code instead.
 
 **Multi-quarter screen.** Call `fdic_query_financials` with the asset floor, a quarter range, and the metrics to trend. Prefer rates such as `noncurrent_loan_rate` and `nonperforming_asset_rate` over dollar balances, which mergers inflate. In SQL, keep CERTs with every quarter present, take each bank's first and last value with window functions, and rank the change.
 

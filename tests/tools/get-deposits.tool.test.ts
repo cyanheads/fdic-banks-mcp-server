@@ -2,8 +2,9 @@
  * @fileoverview Tests for fdic_get_deposits over a faked FDIC transport and the
  * DataCanvas boundary: the three modes (an institution's branches and per-state
  * share, a geography's market ranked with HHI, one institution's position in a
- * market), geography clauses and case variants, the city and county length
- * bounds and the msa_code pattern, the latest-survey default and
+ * market), geography clauses and their spellings, county suffixes and the
+ * Name (City) echo, the city and county length bounds, the longest request URL,
+ * and the msa_code pattern, the latest-survey default and
  * year_not_available, branch paging past 10,000 rows, market names from the
  * page's name lookup or the paged CERT directory, staging on a real DuckDB canvas,
  * the canvas-off path, a staging failure and a cancelled staging call, both
@@ -443,9 +444,24 @@ describe('market mode', () => {
       'STALPBR:"WA" AND CNTYNAMB:("king" OR "King")',
     ],
     [
-      'a dotted city',
+      'a dotted city in each spelling of its group word',
       { state: 'MO', city: 'st. louis' },
-      'STALPBR:"MO" AND CITYBR:("st. louis" OR "St. Louis")',
+      'STALPBR:"MO" AND CITYBR:("st. louis" OR "st louis" OR "saint louis" OR "St. Louis" OR "St Louis" OR "Saint Louis")',
+    ],
+    [
+      'a parish, its suffix stripped',
+      { state: 'LA', county: 'Orleans Parish' },
+      'STALPBR:"LA" AND CNTYNAMB:"Orleans"',
+    ],
+    [
+      'an independent city as Name (City) and Name City',
+      { state: 'VA', county: 'richmond (city)' },
+      'STALPBR:"VA" AND CNTYNAMB:("richmond (City)" OR "Richmond (City)" OR "richmond City" OR "Richmond City" OR "Richmond-City")',
+    ],
+    [
+      'a bare county name, not widened to its independent city',
+      { state: 'VA', county: 'Richmond' },
+      'STALPBR:"VA" AND CNTYNAMB:"Richmond"',
     ],
     [
       'a hyphenated city with its spaced spelling',
@@ -464,6 +480,52 @@ describe('market mode', () => {
     withMarket([]);
     await handle(input);
     expect(requestsWhere('sod', isMarket)[0]?.filters).toBe(`${clause} AND YEAR:2026`);
+  });
+
+  it.each([
+    ['LA', 'Orleans Parish', 'Orleans'],
+    ['VA', 'richmond city', 'richmond (City)'],
+  ])('echoes %s county %j as %j on both surfaces', async (state, county, echoed) => {
+    withLatestYear();
+    withMarket([]);
+    const { result, text } = await run({ state, county });
+    expect(structured<Output>(result).geography).toEqual({ state, county: echoed });
+    expect(text).toContain(`**Geography:** state ${state} · county ${echoed}`);
+  });
+
+  it('answers an empty county market with the suffix, Name (City), and Connecticut rules on both surfaces', async () => {
+    withLatestYear();
+    withMarket([]);
+    const { result, text } = await run({ state: 'CT', county: 'Hartford' });
+    const { notice } = structured<Output>(result);
+    expect(notice).toMatch(/^County and city names/);
+    expect(notice).toContain('Parish');
+    expect(notice).toContain('VA, MD, MO, or NV');
+    expect(notice).toContain('Name (City)');
+    expect(notice).toContain('planning regions from 2023');
+    expect(notice).toContain('msa_code');
+    expect(readLines(text)).toContain(`> ${notice}`);
+  });
+
+  it('matches a Pennsylvania borough as given, not as a same-named county, and answers its empty market with the notice on both surfaces', async () => {
+    withLatestYear();
+    withMarket([]);
+    const { result, text } = await run({ state: 'PA', county: 'Columbia Borough' });
+    expect(requestsWhere('sod', isMarket)[0]?.filters).toBe(
+      'STALPBR:"PA" AND CNTYNAMB:("Columbia Borough" OR "Columbia-Borough") AND YEAR:2026',
+    );
+    const output = structured<Output>(result);
+    expect(output).toMatchObject({
+      geography: { state: 'PA', county: 'Columbia Borough' },
+      market: { deposits: 0, institution_count: 0, branch_count: 0, hhi: null },
+      total_rows: 0,
+    });
+    expect(output.notice).toMatch(/^County and city names/);
+    expect(output.notice).toContain(
+      'City and Borough, Borough, Census Area, or Municipality in AK',
+    );
+    expect(text).toContain('**Geography:** state PA · county Columbia Borough');
+    expect(readLines(text)).toContain(`> ${output.notice}`);
   });
 
   it('reads a market whose deposits sum to zero with null shares and a null HHI', async () => {
@@ -732,6 +794,46 @@ describe('inputs', () => {
     expect(requestsWhere('sod', isMarket)[0]?.filters).toContain(`CITYBR:("${city}" OR `);
   });
 
+  it('keeps the longest county-and-city request under the 8,197 URL characters past which FDIC answers 414', async () => {
+    withLatestYear();
+    withBranches([]);
+    withMarket([]);
+    const city = "st. mary's ".padEnd(50, 'x');
+    const county = `${"st. mary's ".padEnd(45, 'x')} city`;
+    await handle({ cert: CERT, state: 'WA', county, city, zip: '98101', msa_code: '42660' });
+    const longest = Math.max(...fake.requests.map((r) => r.url.href.length));
+    // All 45 county and city spellings are in the URL.
+    expect(longest).toBeGreaterThan(3000);
+    expect(longest).toBeLessThan(8197);
+  });
+
+  it('keeps the worst-case county and city of percent-encoded letters under the 414 limit too', async () => {
+    withLatestYear();
+    withBranches([]);
+    withMarket([]);
+    /**
+     * The longest URL a 50-character county and city build: ᾷ is nine encoded bytes,
+     * and eighteen at a word start, where it uppercases to three code points; each word
+     * follows a space (%20); one apostrophe gives each value all five word-joint forms,
+     * and the county's City sends both its Name (City) and Name City lists.
+     */
+    const city = `ᾷ'ᾷ${' ᾷ'.repeat(23)}ᾷ`;
+    const county = `ᾷ'ᾷ${' ᾷ'.repeat(21)} city`;
+    expect(city).toHaveLength(50);
+    expect(county).toHaveLength(50);
+    await handle({
+      cert: Number.MAX_SAFE_INTEGER,
+      state: 'MO',
+      county,
+      city,
+      zip: '63101',
+      msa_code: '41180',
+    });
+    const longest = Math.max(...fake.requests.map((r) => r.url.href.length));
+    expect(longest).toBeGreaterThan(7000);
+    expect(longest).toBeLessThan(8197);
+  });
+
   it('advertises the city and county bounds and the msa_code pattern in the input schema', () => {
     const shape = tool.input.shape;
     expect(shape.city.safeParse('y'.repeat(50)).success).toBe(true);
@@ -740,6 +842,18 @@ describe('inputs', () => {
     expect(shape.county.safeParse('z'.repeat(51)).success).toBe(false);
     expect(shape.msa_code.safeParse('10180').success).toBe(true);
     expect(shape.msa_code.safeParse('00000').success).toBe(false);
+  });
+
+  it('describes the Name (City) and Connecticut county rules and the St./Saint city spelling in the input schema', () => {
+    const { city, county } = tool.input.shape;
+    expect(county.description).toContain(
+      'A name ending in City or (City) is sent as Name (City) and Name City',
+    );
+    expect(county.description).toContain('the independent cities of VA, MD, MO, and NV');
+    expect(county.description).toContain(
+      "Connecticut's counties are planning regions from 2023 (Capitol), so compare 2022 with 2023 there by city or msa_code",
+    );
+    expect(city.description).toContain('St. Louis finds Saint Louis');
   });
 });
 

@@ -21,6 +21,10 @@ const STATUSES = ['active', 'inactive', 'any'] as const;
 /** "credit union", "FCU", or a trailing "CU" in a name query. */
 const CREDIT_UNION_PATTERN = /credit\s+union|\bfcu\b|\bcu\s*$/i;
 
+/** A relevance page whose order could not be matched to the one earlier pages were served in. */
+const ORDER_NOTICE =
+  'This page can repeat or skip matches from earlier pages of this search: FDIC returned them in a different order this time, and the earlier order could not be restored. Set sort to name or assets_desc for an order that holds on every call.';
+
 const InstitutionSchema = z
   .object({
     cert: z
@@ -126,7 +130,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
       'Headquarters state: two-letter code in any case (wa) or full name (Washington); DC and territories accepted.',
     ),
     city: blankAsUnset(z.string().max(50).optional()).describe(
-      "Headquarters city as FDIC spells it (e.g. Seattle, St. Louis), up to 50 characters; matched exactly, as given or in title case, with a hyphen, apostrophe, or space between words also tried the other ways FDIC records it (Winston-Salem finds Winston Salem, Coeur d'Alene finds Coeur D Alene).",
+      "Headquarters city as FDIC spells it (e.g. Seattle), up to 50 characters; matched exactly as given or in title case, with St./St/Saint, Ste./Ste/Sainte, Ft./Ft/Fort, or Mt./Mt/Mount (St. Louis finds Saint Louis) and a hyphen, apostrophe, or space between words (Winston-Salem finds Winston Salem, Coeur d'Alene finds Coeur D Alene) also tried the other ways FDIC records them.",
     ),
     status: blankAsUnset(z.enum(STATUSES).optional()).describe(
       'active, inactive (merged, failed, or closed), or any. Default: any when name or certs is given, otherwise active. The applied value is echoed as status_filter.',
@@ -155,13 +159,13 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
       "Holding company RSSD ID from any result's holding_company.rssd; lists the institutions under that top holder. With status any, former subsidiaries are included under the holder they had at closing.",
     ),
     sort: blankAsUnset(z.enum(['relevance', 'assets_desc', 'name']).optional()).describe(
-      'relevance (active institutions whose current name holds every word of name first, then every other match, each by match score; default when name is given — without name it falls back to assets_desc), assets_desc (largest first; the default otherwise), or name (A–Z).',
+      'relevance (active institutions whose current name holds every word of name first, then every other match, each by match score; default when name is given — without name it falls back to assets_desc), assets_desc (largest first; the default otherwise), or name (A–Z). assets_desc and name break ties by CERT.',
     ),
     limit: blankAsUnset(z.number().int().min(1).max(10_000).default(20)).describe(
       'Institutions per page; accepts 1–10000, executes at most 100. effective_limit reports the applied count; use next_offset to continue.',
     ),
     offset: blankAsUnset(z.number().int().min(0).max(100_000).default(0)).describe(
-      'Matches to skip (0–100,000); pass next_offset from the previous page.',
+      'Matches to skip (0–100,000); pass next_offset from the previous page. Following next_offset returns each match once; a notice flags a relevance page that can repeat or skip one.',
     ),
   }),
 
@@ -189,7 +193,9 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when nothing matched, the page is past the end, or more pages remain.'),
+      .describe(
+        'Guidance when nothing matched, the page is past the end, or more pages remain, and a caveat on a relevance page that can repeat or skip a match from an earlier page of the same search.',
+      ),
     truncated: z.boolean().optional().describe('True when more matches remain beyond this page.'),
     shown: z.number().optional().describe('Institutions returned on this page.'),
     cap: z.number().optional().describe('The limit applied to this page.'),
@@ -323,9 +329,16 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
     const found = existing ?? new Set(page.rows.map((row) => row.cert));
     const missing = certs?.filter((cert) => !found.has(cert)) ?? [];
     const end = input.offset + page.rows.length;
-    const hasMore = end < page.total;
+    // An empty page never points onward: next_offset would equal this offset and loop a walk.
+    const hasMore = page.rows.length > 0 && end < page.total;
+    const caveat = page.orderUnconfirmed ? ORDER_NOTICE : undefined;
 
-    ctx.log.info('Institution search', { total: page.total, returned: page.rows.length, status });
+    ctx.log.info('Institution search', {
+      total: page.total,
+      returned: page.rows.length,
+      status,
+      orderUnconfirmed: page.orderUnconfirmed,
+    });
 
     if (page.total === 0) {
       const fragments: string[] = [];
@@ -343,7 +356,7 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
         fragments.push('Every word of the name must match; drop a word or check the spelling.');
       if (input.city) {
         fragments.push(
-          'City matching is exact as FDIC spells it (for example Seattle, St. Louis); drop city and filter by state to browse.',
+          'City names match as FDIC spells them (Seattle; St. Louis also finds Saint Louis); drop city and filter by state to browse.',
         );
       }
       if (minAssets !== undefined || input.max_assets !== undefined) {
@@ -360,8 +373,13 @@ export const searchInstitutionsTool = tool('fdic_search_institutions', {
       ctx.enrich.truncated({
         shown: page.rows.length,
         cap: limit,
-        guidance: `Showing matches ${input.offset + 1}–${end} of ${page.total}; pass offset ${end} for the next page, or narrow the filters.`,
+        guidance: [
+          `Showing matches ${input.offset + 1}–${end} of ${page.total}; pass offset ${end} for the next page, or narrow the filters.`,
+          ...(caveat ? [caveat] : []),
+        ].join(' '),
       });
+    } else if (caveat) {
+      ctx.enrich.notice(caveat);
     }
 
     return {

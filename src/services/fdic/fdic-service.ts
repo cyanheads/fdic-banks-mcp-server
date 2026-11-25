@@ -3,7 +3,7 @@
  * One pipeline per request — cache → in-flight dedupe → retry (outside) → pacer
  * (inside) → transport → JSON parse → envelope check — plus typed query methods
  * that own the upstream's traps: case-sensitive codes, `REPDTE` as a string field,
- * `sort_by` honored only beside `sort_order`, absence sentinels, and ratios FDIC
+ * `sort_by` honored only beside `sort_order`, absence sentinels, and fields FDIC
  * reports as `0` when unreported.
  * @module services/fdic/fdic-service
  */
@@ -44,6 +44,7 @@ import {
   type Clause,
   caseVariants,
   containsAllTokens,
+  countyVariants,
   eq,
   isoToRepdte,
   nameTokens,
@@ -66,6 +67,7 @@ import type {
   FailureSort,
   FailureTotals,
   FdicEnvelope,
+  FdicRow,
   FinancialRow,
   HistoryEvent,
   HistoryRow,
@@ -90,7 +92,7 @@ const MAX_QUEUE_WAIT_MS = 15_000;
 const TOOL_BUDGET_MS = 45_000;
 /** Budget of the multi-quarter panel fetch, the one long-running call. */
 export const PANEL_BUDGET_MS = 55_000;
-/** Largest page BankFind serves; also the aggregation bucket cap (`agg_limit`). */
+/** Largest page BankFind serves; also the aggregation bucket cap (`agg_limit`) and the chunk a relevance search is read in. */
 const MAX_PAGE = 10_000;
 /** Panel runs fetched concurrently (the pacer still bounds requests in flight). */
 const PANEL_RUN_CONCURRENCY = 3;
@@ -99,6 +101,15 @@ const COOLDOWN_BASE_MS = 5_000;
 
 const MAX_CACHE_BYTES = 64 * 1024 * 1024;
 const MAX_ENTRY_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Reads of a relevance chunk, beyond the first, while it disagrees with its
+ * recorded order. FDIC picks one of its two orders per request (7 and 5 of 12
+ * repeated reads), so a chunk still disagrees after 6 more reads about 1 time in 64.
+ */
+const MAX_ORDER_REREADS = 6;
+/** Bound of the relevance order record: about 200 full chunks, each 40 KB, against the cache's 14. */
+const MAX_ORDER_BYTES = 8 * 1024 * 1024;
 
 type Endpoint = 'institutions' | 'financials' | 'failures' | 'sod' | 'history';
 type Params = Record<string, string | number | undefined>;
@@ -160,12 +171,14 @@ interface CacheEntry {
 /** LRU over successful envelopes, bounded by approximate response size. */
 class ResponseCache {
   private readonly entries = new Map<string, CacheEntry>();
+  private readonly ttlMs: number;
+  private readonly now: () => number;
   private totalBytes = 0;
 
-  constructor(
-    private readonly ttlMs: number,
-    private readonly now: () => number,
-  ) {}
+  constructor(ttlMs: number, now: () => number) {
+    this.ttlMs = ttlMs;
+    this.now = now;
+  }
 
   get(key: string): FdicEnvelope | undefined {
     const entry = this.entries.get(key);
@@ -196,6 +209,121 @@ class ResponseCache {
     const entry = this.entries.get(key);
     if (!entry) return;
     this.entries.delete(key);
+    this.totalBytes -= entry.bytes;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Relevance chunk orders
+// ---------------------------------------------------------------------------
+
+/**
+ * Heap of one tier record besides its key (counted at 2 bytes a character): the
+ * object, its chunk map, and its LRU slot. Measured on Node 26 and Bun 1.4, a record
+ * with an 89-character key and one empty chunk holds 560–630 bytes.
+ */
+const TIER_RECORD_BYTES = 400;
+/** Heap of one recorded chunk besides its 4 bytes a CERT (measured 64–200 bytes): the typed array and its map slot. */
+const CHUNK_RECORD_BYTES = 200;
+
+/** The chunk orders of one relevance tier, all from one FDIC index build. */
+interface TierOrder {
+  bytes: number;
+  /** Chunk index → its CERTs, in the order the chunk was served. */
+  chunks: Map<number, Int32Array>;
+  dataAsOf: string;
+}
+
+/** How a chunk read lines up with the order its tier was served in. */
+type Alignment =
+  /** The read holds the chunk's recorded CERTs, or shares none with the tier's other chunks: `rows` is it in the served order. */
+  | { kind: 'aligned'; rows: FdicRow[] }
+  /** The read comes from a newer FDIC index build than the record, so there is nothing to compare it with. */
+  | { kind: 'rebuilt' }
+  /** A different CERT set, a CERT another chunk of the tier holds, or an older index build. */
+  | { kind: 'disagrees' };
+
+const certOf = (row: FdicRow): number => num(row.data.CERT) ?? 0;
+
+function sameOrder(certs: Int32Array, rows: readonly FdicRow[]): boolean {
+  return certs.length === rows.length && rows.every((row, i) => certOf(row) === certs[i]);
+}
+
+/**
+ * The CERT order each relevance chunk was served in, per tier (`search` and
+ * `filters`), kept past the chunk's cache entry so a later read of the chunk — after
+ * expiry, eviction, or with the cache off — can be checked against what earlier
+ * pages were cut from. LRU by tier, bounded by bytes.
+ */
+class ChunkOrders {
+  private readonly tiers = new Map<string, TierOrder>();
+  private totalBytes = 0;
+
+  align(tier: string, index: number, read: FdicEnvelope): Alignment {
+    const entry = this.tiers.get(tier);
+    if (!entry) return { kind: 'aligned', rows: read.rows };
+    if (read.dataAsOf > entry.dataAsOf) return { kind: 'rebuilt' };
+    if (read.dataAsOf < entry.dataAsOf) return { kind: 'disagrees' };
+    const own = entry.chunks.get(index);
+    if (own) {
+      if (sameOrder(own, read.rows)) return { kind: 'aligned', rows: read.rows };
+      const byCert = new Map(read.rows.map((row) => [certOf(row), row]));
+      if (byCert.size !== own.length || read.rows.length !== own.length) {
+        return { kind: 'disagrees' };
+      }
+      const rows: FdicRow[] = [];
+      for (const cert of own) {
+        const row = byCert.get(cert);
+        if (!row) return { kind: 'disagrees' };
+        rows.push(row);
+      }
+      return { kind: 'aligned', rows };
+    }
+    const certs = new Set(read.rows.map(certOf));
+    for (const [other, recorded] of entry.chunks) {
+      if (other !== index && recorded.some((cert) => certs.has(cert))) return { kind: 'disagrees' };
+    }
+    return { kind: 'aligned', rows: read.rows };
+  }
+
+  /**
+   * Records `read` as the chunk's served order. A read from a newer index build
+   * replaces the tier's record; one from an older build is ignored.
+   */
+  record(tier: string, index: number, read: FdicEnvelope): void {
+    let entry = this.tiers.get(tier);
+    if (entry && read.dataAsOf < entry.dataAsOf) return;
+    if (entry && read.dataAsOf > entry.dataAsOf) {
+      this.drop(tier);
+      entry = undefined;
+    }
+    if (!entry) {
+      entry = {
+        dataAsOf: read.dataAsOf,
+        chunks: new Map(),
+        bytes: TIER_RECORD_BYTES + 2 * tier.length,
+      };
+      this.totalBytes += entry.bytes;
+    }
+    this.tiers.delete(tier);
+    this.tiers.set(tier, entry);
+    const previous = entry.chunks.get(index);
+    if (previous && sameOrder(previous, read.rows)) return;
+    const certs = Int32Array.from(read.rows, certOf);
+    const bytes = certs.byteLength + (previous ? -previous.byteLength : CHUNK_RECORD_BYTES);
+    entry.chunks.set(index, certs);
+    entry.bytes += bytes;
+    this.totalBytes += bytes;
+    for (const oldest of this.tiers.keys()) {
+      if (this.totalBytes <= MAX_ORDER_BYTES) break;
+      this.drop(oldest);
+    }
+  }
+
+  private drop(tier: string): void {
+    const entry = this.tiers.get(tier);
+    if (!entry) return;
+    this.tiers.delete(tier);
     this.totalBytes -= entry.bytes;
   }
 }
@@ -371,6 +499,19 @@ export interface InstitutionSearch {
   status: InstitutionStatus;
 }
 
+/** One page of an institution search. */
+export interface InstitutionPage {
+  dataAsOf: string;
+  /**
+   * A relevance page past offset 0 cut from a chunk whose order could not be matched
+   * to the one earlier pages of the search were cut from (its re-reads ran out or
+   * failed, or FDIC rebuilt its index), so it can repeat or skip one of their matches.
+   */
+  orderUnconfirmed: boolean;
+  rows: InstitutionRecord[];
+  total: number;
+}
+
 const INSTITUTION_FIELDS = [
   'CERT',
   'NAME',
@@ -446,7 +587,7 @@ function failureClause(f: FailureFilters): Clause | undefined {
 }
 
 /**
- * A panel's shared filters. A threshold on a zero-means-unreported ratio also
+ * A panel's shared filters. A threshold on a zero-means-unreported metric also
  * excludes `0`, so an upper bound never admits the filers that did not report it.
  */
 function panelClause(f: PanelFilters): Clause | undefined {
@@ -542,13 +683,15 @@ const HISTORY_BRANCH_FIELDS = [
 
 /**
  * A Summary of Deposits geography. `CNTYNAMB` and `CITYBR` match exactly and
- * case-sensitively upstream, so both the given and title-case spellings are sent.
+ * case-sensitively upstream, so every spelling FDIC records a place under is sent:
+ * {@link countyVariants} for the county (a `Name (City)` county also as
+ * `Name City`), {@link caseVariants} for the city.
  */
 function sodGeoClause(g: SodGeography | undefined): Clause | undefined {
   if (!g) return;
   return and(
     g.state ? eq('STALPBR', g.state) : undefined,
-    g.county ? anyOf('CNTYNAMB', caseVariants(g.county)) : undefined,
+    g.county ? anyOf('CNTYNAMB', countyVariants(g.county)) : undefined,
     g.city ? anyOf('CITYBR', caseVariants(g.city)) : undefined,
     g.zip ? eq('ZIPBR', g.zip) : undefined,
     g.msaCode !== undefined ? eq('MSABR', g.msaCode) : undefined,
@@ -645,10 +788,17 @@ interface InFlight {
   signal: AbortSignal;
 }
 
+/** A relevance chunk as served, and whether its order matched the one earlier pages were cut from. */
+interface OrderedChunk {
+  confirmed: boolean;
+  envelope: FdicEnvelope;
+}
+
 export class FdicService {
   private readonly cache: ResponseCache;
   private readonly getJson: GetJson;
   private readonly inflight = new Map<string, InFlight>();
+  private readonly orders = new ChunkOrders();
   private readonly pacer: Pacer;
 
   constructor(options: FdicServiceOptions = {}) {
@@ -761,17 +911,21 @@ export class FdicService {
   // -------------------------------------------------------------------------
 
   /**
-   * One page of institutions. Relevance order for a name search is two searches:
+   * One page of institutions. Relevance order for a name search is two tiers:
    * active institutions whose current name holds every query word, then every
    * other match, each in FDIC's match-score order — the score alone ranks inactive
    * affiliates and fuzzy or former-name matches above the operating bank a query
-   * names. The two tiers partition the match set, so `total` is their sum.
+   * names. The two tiers partition the match set, so `total` is their sum; a
+   * `status: inactive` search holds no active match and is one tier. Tiers are
+   * read in chunks ({@link FdicService.scoreOrderedPage}). A sorted search sends
+   * `CERT` after its sort field, so FDIC breaks ties the same way on every
+   * request and offset pages never overlap.
    */
   async searchInstitutions(
     q: InstitutionSearch,
     ctx: Context,
     budget: CallBudget,
-  ): Promise<{ dataAsOf: string; rows: InstitutionRecord[]; total: number }> {
+  ): Promise<InstitutionPage> {
     const filters = and(
       q.certs?.length ? anyOf('CERT', q.certs) : undefined,
       q.state ? eq('STALP', q.state) : undefined,
@@ -783,61 +937,182 @@ export class FdicService {
         : undefined,
       q.holdingCompanyRssd !== undefined ? eq('RSSDHCR', String(q.holdingCompanyRssd)) : undefined,
     );
-    const page = (clause: Clause | undefined, offset: number, limit: number, sort?: Params) =>
-      this.query(
-        'institutions',
-        {
-          search: q.name ? `NAME:${q.name}` : undefined,
-          filters: clause,
-          fields: INSTITUTION_FIELDS,
-          limit,
-          offset,
-          ...sort,
-        },
-        ctx,
-        budget,
-      );
-
-    const current =
-      q.sort === 'relevance' && q.name && q.status !== 'inactive'
-        ? and(
-            q.status === 'any' ? eq('ACTIVE', 1) : undefined,
-            containsAllTokens('NAME', nameTokens(q.name)),
-          )
-        : undefined;
-    if (!current) {
-      const sort =
-        q.sort === 'relevance'
+    if (q.sort === 'relevance' && q.name) {
+      const current =
+        q.status === 'inactive'
           ? undefined
-          : q.sort === 'name'
-            ? { sort_by: 'NAME', sort_order: 'ASC' }
-            : { sort_by: 'ASSET', sort_order: 'DESC' };
-      const envelope = await page(filters, q.offset, q.limit, sort);
-      return {
-        rows: envelope.rows.map(normalizeInstitution),
-        total: envelope.total,
-        dataAsOf: envelope.dataAsOf,
-      };
+          : and(
+              q.status === 'any' ? eq('ACTIVE', 1) : undefined,
+              containsAllTokens('NAME', nameTokens(q.name)),
+            );
+      const tiers = current ? [and(filters, current), and(filters, not(current))] : [filters];
+      return this.scoreOrderedPage(`NAME:${q.name}`, tiers, q.offset, q.limit, ctx, budget);
     }
 
-    const lead = and(filters, current);
-    const rest = and(filters, not(current));
-    // The rest tier starts where the lead tier runs out; on the first page that is its own start.
-    const [first, second] =
-      q.offset === 0
-        ? await Promise.all([page(lead, 0, q.limit), page(rest, 0, q.limit)])
-        : await page(lead, q.offset, q.limit).then(
-            async (first) =>
-              [
-                first,
-                await page(rest, Math.max(0, q.offset - first.total), q.limit - first.rows.length),
-              ] as const,
-          );
+    const sort =
+      q.sort === 'relevance'
+        ? undefined
+        : q.sort === 'name'
+          ? { sort_by: 'NAME,CERT', sort_order: 'ASC' }
+          : { sort_by: 'ASSET,CERT', sort_order: 'DESC' };
+    const envelope = await this.query(
+      'institutions',
+      {
+        search: q.name ? `NAME:${q.name}` : undefined,
+        filters,
+        fields: INSTITUTION_FIELDS,
+        limit: q.limit,
+        offset: q.offset,
+        ...sort,
+      },
+      ctx,
+      budget,
+    );
     return {
-      rows: [...first.rows, ...second.rows].slice(0, q.limit).map(normalizeInstitution),
-      total: first.total + second.total,
-      dataAsOf: first.dataAsOf,
+      rows: envelope.rows.map(normalizeInstitution),
+      total: envelope.total,
+      dataAsOf: envelope.dataAsOf,
+      orderUnconfirmed: false,
     };
+  }
+
+  /**
+   * One page of a relevance search, cut from its tiers in 10,000-match chunks.
+   * FDIC answers the same `search` request in either of two orders whose match
+   * scores differ, so pages read by their own `offset` requests mix both: a match
+   * comes back twice and another never. Each tier is read instead in chunks at
+   * multiples of 10,000, and every page is sliced from them in the order its
+   * chunks were first served ({@link FdicService.orderedChunk}), so a walk returns
+   * each match once. A tier the page does not reach is only counted (`limit=0`);
+   * on the first page the first tier's first chunk stands in for its count. The
+   * first read to fail aborts every other read of the call, retries included.
+   */
+  private async scoreOrderedPage(
+    search: string,
+    tiers: readonly (Clause | undefined)[],
+    offset: number,
+    limit: number,
+    ctx: Context,
+    budget: CallBudget,
+  ): Promise<InstitutionPage> {
+    const local = new AbortController();
+    const readCtx: Context = { ...ctx, signal: AbortSignal.any([ctx.signal, local.signal]) };
+    // One read per chunk within the call, even with the response cache off.
+    const reads = new Map<string, Promise<OrderedChunk>>();
+    const chunk = (tier: number, index: number): Promise<OrderedChunk> => {
+      const key = `${tier}:${index}`;
+      let read = reads.get(key);
+      if (!read) {
+        const params: Params = {
+          search,
+          filters: tiers[tier],
+          fields: INSTITUTION_FIELDS,
+          limit: MAX_PAGE,
+          offset: index * MAX_PAGE,
+        };
+        read = this.orderedChunk(
+          params,
+          JSON.stringify([search, tiers[tier]]),
+          index,
+          readCtx,
+          budget,
+        );
+        reads.set(key, read);
+      }
+      return read;
+    };
+
+    try {
+      const heads = await Promise.all(
+        tiers.map((filters, tier) =>
+          tier === 0 && offset === 0
+            ? chunk(0, 0).then((c) => c.envelope)
+            : this.query('institutions', { search, filters, limit: 0 }, readCtx, budget),
+        ),
+      );
+
+      // Each tier's part of the page, as row ranges [from, to) within its chunks.
+      const end = offset + limit;
+      const slices: { from: number; index: number; tier: number; to: number }[] = [];
+      let start = 0;
+      for (const [tier, head] of heads.entries()) {
+        const from = Math.max(offset, start) - start;
+        const to = Math.min(end, start + head.total) - start;
+        for (let index = Math.floor(from / MAX_PAGE); from < to && index * MAX_PAGE < to; index++) {
+          const base = index * MAX_PAGE;
+          slices.push({
+            tier,
+            index,
+            from: Math.max(from, base) - base,
+            to: Math.min(to, base + MAX_PAGE) - base,
+          });
+        }
+        start += head.total;
+      }
+
+      const parts = await Promise.all(
+        slices.map(async (s) => ({ ...s, read: await chunk(s.tier, s.index) })),
+      );
+      return {
+        rows: parts
+          .flatMap((p) => p.read.envelope.rows.slice(p.from, p.to))
+          .map(normalizeInstitution),
+        total: start,
+        dataAsOf: (heads[0] as FdicEnvelope).dataAsOf,
+        orderUnconfirmed: offset > 0 && parts.some((p) => !p.read.confirmed),
+      };
+    } catch (err) {
+      local.abort();
+      throw err;
+    }
+  }
+
+  /**
+   * One relevance chunk, in the order earlier pages of its search were cut from.
+   * The read goes through the cache and in-flight dedupe; while it disagrees with
+   * the tier's record ({@link ChunkOrders.align}), the chunk is read again past
+   * both, up to {@link MAX_ORDER_REREADS} times and only while the budget leaves
+   * twice the slowest read so far. A read holding the recorded CERTs is served in
+   * the recorded order, with no further request. What is served becomes the record
+   * and the cache entry; it is `confirmed` unless the re-reads ran out or failed or
+   * FDIC rebuilt its index. A failed re-read serves the read in hand; cancellation
+   * always throws.
+   */
+  private async orderedChunk(
+    params: Params,
+    tier: string,
+    index: number,
+    ctx: Context,
+    budget: CallBudget,
+  ): Promise<OrderedChunk> {
+    const url = buildUrl('institutions', params);
+    let startedAt = Date.now();
+    const first = await this.query('institutions', params, ctx, budget);
+    let slowestMs = Date.now() - startedAt;
+    let envelope = first;
+    let confirmed = false;
+    for (let rereads = 0; ; rereads++) {
+      const alignment = this.orders.align(tier, index, envelope);
+      if (alignment.kind === 'aligned') {
+        confirmed = true;
+        if (alignment.rows !== envelope.rows) envelope = { ...envelope, rows: alignment.rows };
+        break;
+      }
+      if (alignment.kind === 'rebuilt') break;
+      if (rereads === MAX_ORDER_REREADS || budget.deadlineAt - Date.now() < 2 * slowestMs) break;
+      try {
+        startedAt = Date.now();
+        envelope = await this.fetchUncached(url, 'institutions', ctx, budget);
+        slowestMs = Math.max(slowestMs, Date.now() - startedAt);
+      } catch (err) {
+        if (ctx.signal.aborted) throw err;
+        break;
+      }
+    }
+    ctx.signal.throwIfAborted();
+    this.orders.record(tier, index, envelope);
+    if (envelope !== first) this.cache.set(url.toString(), envelope);
+    return { envelope, confirmed };
   }
 
   /** The institution record for one CERT, active or not. */

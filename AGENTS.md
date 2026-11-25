@@ -2,10 +2,11 @@
 
 **Server:** fdic-banks-mcp-server
 **Version:** 0.3.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
+**Held dependencies:** `@duckdb/node-api` stays on `^1.5.6-r.2`: on DuckDB 2 every canvas holds an unbounded `async_threads` pool, which panics Bun at macOS's thread cap ([mcp-ts-core#870](https://github.com/cyanheads/mcp-ts-core/issues/870)). `vitest` and `@vitest/coverage-istanbul` stay at exactly `5.1.0`: 5.1.1's forks pool calls `child.channel.unref()`, which Bun lacks, and the threads pool cannot run `tests/index.test.ts`, which calls `process.chdir()`.
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -286,9 +287,9 @@ src/
   services/
     fdic/
       fdic-service.ts                   # BankFind client: cache → dedupe → retry → pacer → transport (init/accessor)
-      query-builder.ts                  # Filter clauses, report-date and name normalization
+      query-builder.ts                  # Filter clauses, place-name spellings, county names, report-date and name normalization
       normalize.ts                      # Raw BankFind rows → domain records
-      metric-catalog.ts                 # 49 curated Call Report metrics (field, unit, basis) + default set
+      metric-catalog.ts                 # 60 curated Call Report metrics (field, unit, basis) + default set
       peer-stats.ts                     # Peer median, quartiles, percentile, rank
       asset-bands.ts, bank-classes.ts, change-codes.ts, coverage.ts,
       failure-methods.ts, insurance-funds.ts, us-states.ts   # Static reference tables
@@ -413,7 +414,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces `dist/fdic-banks-mcp-server.mcpb`, an extension bundle for one-click install in Claude Desktop; `bun run release:github` attaches it to the GitHub Release. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/` at a package root, and any stray `SKILL.md` — the MCP SDK's `dist/ext/skills/` runtime, which serves this server's skill, stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. The bundle therefore ships without the DuckDB native, and a bundle running with `duckdb` would start normally and then fail on its first staging call, so `manifest.json` pins `CANVAS_PROVIDER_TYPE` to the literal `"none"` with no `user_config` option for it: the bundle is inline-only, the producers return their pages with no staged table, the dataframe tools report that dataframes are off, and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected.
+`npm run bundle` produces `dist/fdic-banks-mcp-server.mcpb`, an extension bundle for one-click install in Claude Desktop; `bun run release:github` attaches it to the GitHub Release. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs — `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package's root, and `SKILL.md` anywhere (a `skills/` deeper in a package is runtime code and stays: the MCP SDK's `dist/ext/skills/` serves this server's skill); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. The bundle therefore ships without the DuckDB native, and a bundle running with `duckdb` would start normally and then fail on its first staging call, so `manifest.json` pins `CANVAS_PROVIDER_TYPE` to the literal `"none"` with no `user_config` option for it: the bundle is inline-only, the producers return their pages with no staged table, the dataframe tools report that dataframes are off, and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`), except a variable that acts only on staged dataframes (`FDIC_DATASET_TTL_SECONDS`, `FDIC_DATAFRAME_DROP_ENABLED`), which the canvas-off bundle leaves out. `lint:packaging` (run by `devcheck`) verifies that every `manifest.json` variable is in `server.json`, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

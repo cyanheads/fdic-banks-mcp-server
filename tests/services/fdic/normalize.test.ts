@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for the BankFind row normalizers over recorded-shape rows:
  * numeric coercion, ISO dates, blanks and absence sentinels dropped to absent,
- * zero-means-unreported ratios nulled, and `/history` rows turned into events —
+ * zero-means-unreported fields nulled, and `/history` rows turned into events —
  * the one-event-per-exit pairing rule, role and counterparty, recorded changes,
  * and newest-first order.
  * @module tests/services/fdic/normalize.test
@@ -231,6 +231,90 @@ describe('metricValues', () => {
       noncurrent_loan_rate: 0,
       insured_deposit_share: null,
       roa: -0.5,
+    });
+  });
+
+  it('nulls an exact 0 on the risk-based capital amounts RBC and RWAJ only', () => {
+    const zeros = {
+      SCHA: 0,
+      SCHF: 0,
+      SCAA: 0,
+      SCAF: 0,
+      RBCT1J: 0,
+      RBC: 0,
+      RWAJ: 0,
+      LNAG: 0,
+      LNREAG: 0,
+      LNRENROT: 0,
+      LNCOMRE: 0,
+    };
+    expect(
+      metricValues(zeros, [
+        'held_to_maturity_amortized_cost',
+        'held_to_maturity_fair_value',
+        'available_for_sale_amortized_cost',
+        'available_for_sale_fair_value',
+        'tier1_capital',
+        'total_risk_based_capital',
+        'risk_weighted_assets',
+        'agricultural_production_loans',
+        'farmland_loans',
+        'nonfarm_nonresidential_non_owner_occupied_loans',
+        'cre_loans_not_secured_by_real_estate',
+      ]),
+    ).toEqual({
+      held_to_maturity_amortized_cost: 0,
+      held_to_maturity_fair_value: 0,
+      available_for_sale_amortized_cost: 0,
+      available_for_sale_fair_value: 0,
+      tier1_capital: 0,
+      total_risk_based_capital: null,
+      risk_weighted_assets: null,
+      agricultural_production_loans: 0,
+      farmland_loans: 0,
+      nonfarm_nonresidential_non_owner_occupied_loans: 0,
+      cre_loans_not_secured_by_real_estate: 0,
+    });
+  });
+
+  it('reads the fields a Thrift Financial Report filer leaves null as null, beside the ones it reported', () => {
+    // A savings and loan's 2010-12-31 row as FDIC returns it, with SCHF, SCAA, LNAG, LNREAG, and LNRENROT null.
+    const tfrFiler = {
+      SCHA: 189268,
+      SCHF: null,
+      SCAA: null,
+      SCAF: 6825,
+      RBCT1J: 206016,
+      RBC: 207052,
+      RWAJ: 328846,
+      LNAG: null,
+      LNREAG: null,
+      LNRENROT: null,
+    };
+    expect(
+      metricValues(tfrFiler, [
+        'held_to_maturity_amortized_cost',
+        'held_to_maturity_fair_value',
+        'available_for_sale_amortized_cost',
+        'available_for_sale_fair_value',
+        'tier1_capital',
+        'total_risk_based_capital',
+        'risk_weighted_assets',
+        'agricultural_production_loans',
+        'farmland_loans',
+        'nonfarm_nonresidential_non_owner_occupied_loans',
+      ]),
+    ).toEqual({
+      held_to_maturity_amortized_cost: 189268,
+      held_to_maturity_fair_value: null,
+      available_for_sale_amortized_cost: null,
+      available_for_sale_fair_value: 6825,
+      tier1_capital: 206016,
+      total_risk_based_capital: 207052,
+      risk_weighted_assets: 328846,
+      agricultural_production_loans: null,
+      farmland_loans: null,
+      nonfarm_nonresidential_non_owner_occupied_loans: null,
     });
   });
 

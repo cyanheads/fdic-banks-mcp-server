@@ -25,6 +25,7 @@ import {
 import {
   METRIC_BASES,
   METRIC_CATALOG,
+  METRIC_NAMES,
   METRIC_UNITS,
   type MetricName,
   metricDefinitions,
@@ -56,6 +57,16 @@ const MetricDefinitionSchema = z
     note: z.string().optional().describe('Caveat, such as zero meaning not reported.'),
   })
   .describe('Definition of one metric in the rows.');
+
+const unreportedMetrics = new Intl.ListFormat('en', { type: 'disjunction' }).format(
+  METRIC_NAMES.filter((metric) => METRIC_CATALOG[metric].zeroMeansUnreported),
+);
+
+/**
+ * Names, from the catalog's flags, every metric whose unreported `0` a threshold
+ * skips: the panel query adds `!(FIELD:0)` beside each bound on one.
+ */
+const UNREPORTED_THRESHOLD_NOTE = `A threshold on ${unreportedMetrics} skips filers that did not report it.`;
 
 /** Order: the sort metric (nulls last), then newest quarter, then lowest CERT. */
 function comparePanelRows(sortBy: MetricName | undefined, order: 'asc' | 'desc') {
@@ -115,7 +126,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       .max(5)
       .optional()
       .describe(
-        'Up to 5 metric thresholds, all of which a row must meet. A threshold on a capital ratio or insured_deposit_share skips filers that did not report it. Each filtered metric is added to metrics.',
+        `Up to 5 metric thresholds, all of which a row must meet. ${UNREPORTED_THRESHOLD_NOTE} Each filtered metric is added to metrics.`,
       ),
     metrics: z
       .array(metricEnum)
@@ -445,7 +456,7 @@ export const queryFinancialsTool = tool('fdic_query_financials', {
       }
       if (metricFilters.length) {
         fragments.push(
-          "Metric thresholds are in each metric's unit — percentages for ratios (3 = 3%), thousands of dollars for amounts; fdic_list_reference with topic metrics lists each unit. Capital ratios are null for filers that do not report them.",
+          `Metric thresholds are in each metric's unit — percentages for ratios (3 = 3%), thousands of dollars for amounts; fdic_list_reference with topic metrics lists each unit. ${UNREPORTED_THRESHOLD_NOTE}`,
         );
       }
       const assetBounded = minAssets !== undefined || input.max_assets !== undefined;

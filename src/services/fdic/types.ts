@@ -159,7 +159,11 @@ export interface PanelRow {
 /** A Summary of Deposits geography; every set field narrows the branch rows. */
 export interface SodGeography {
   city?: string;
-  /** County name with any trailing " County" already stripped. */
+  /**
+   * County name as `countyName` returns it: `County` stripped, a county-equivalent
+   * suffix stripped in the states whose counties it names (`Parish` in LA, `Borough`
+   * in AK, …), an independent city as `Name (City)`.
+   */
   county?: string;
   /** CBSA code as a number (`MSABR` is numeric upstream). */
   msaCode?: number;

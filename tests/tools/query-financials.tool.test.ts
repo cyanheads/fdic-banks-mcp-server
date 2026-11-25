@@ -7,7 +7,7 @@
  * and CERT-ordered paging of a quarter larger than a page, quarter
  * planning under the panel row cap (whole oldest quarters dropped, a partial
  * newest quarter), metric thresholds with !(FIELD:0) on zero-means-unreported
- * ratios, local sorting, staging on a real DuckDB canvas, the canvas-off path, a
+ * metrics, local sorting, staging on a real DuckDB canvas, the canvas-off path, a
  * staging failure and a cancelled staging call, both output surfaces, and every
  * declared error reason.
  * @module tests/tools/query-financials.tool.test
@@ -28,7 +28,7 @@ import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-que
 import { queryFinancialsTool } from '@/mcp-server/tools/definitions/query-financials.tool.js';
 import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { disposeFdicService } from '@/services/fdic/fdic-service.js';
-import { METRIC_NAMES } from '@/services/fdic/metric-catalog.js';
+import { METRIC_NAMES, ZERO_UNREPORTED_NOTE } from '@/services/fdic/metric-catalog.js';
 import { DEFAULT_METRIC_FIELDS, panelRow } from '../fixtures/fdic-records.js';
 import { canvasDouble, createDuckdbCanvas, tenantSession } from '../helpers/canvas.js';
 import {
@@ -317,10 +317,12 @@ describe('requests', () => {
     ['insured_deposit_share', 'ESTINS', 'ESTINS:[4 TO *] AND !(ESTINS:0)'],
     ['tier1_risk_based_ratio', 'IDT1RWAJR', 'IDT1RWAJR:[4 TO *] AND !(IDT1RWAJR:0)'],
     ['total_risk_based_capital_ratio', 'RBCRWAJ', 'RBCRWAJ:[4 TO *] AND !(RBCRWAJ:0)'],
+    ['total_risk_based_capital', 'RBC', 'RBC:[4 TO *] AND !(RBC:0)'],
     ['equity_to_assets', 'EQV', 'EQV:[4 TO *]'],
     ['noncurrent_loan_rate', 'NCLNLSR', 'NCLNLSR:[4 TO *]'],
+    ['tier1_capital', 'RBCT1J', 'RBCT1J:[4 TO *]'],
   ])(
-    'bounds %s (%s) and excludes an unreported 0 only on zero-means-unreported ratios',
+    'bounds %s (%s) and excludes an unreported 0 only on zero-means-unreported metrics',
     async (metric, _field, clause) => {
       withPanel({});
       await handle({
@@ -330,6 +332,97 @@ describe('requests', () => {
       expect(paramsOf(isPreflight).filters).toBe(`REPDTE:[20260630 TO 20260630] AND ${clause}`);
     },
   );
+
+  it('names every metric a threshold skips when unreported, in the metric_filters description and the zero-hit notice', async () => {
+    const skips =
+      'A threshold on insured_deposit_share, total_risk_based_capital, risk_weighted_assets, leverage_ratio, cet1_ratio, tier1_risk_based_ratio, or total_risk_based_capital_ratio skips filers that did not report it.';
+    expect(tool.input.shape.metric_filters.description).toContain(skips);
+    withPanel({});
+    const { result, text } = await run({
+      metric_filters: [{ metric: 'risk_weighted_assets', max: 50_000 }],
+      to_date: '2026Q2',
+    });
+    expect(paramsOf(isPreflight).filters).toBe(
+      'REPDTE:[20260630 TO 20260630] AND RWAJ:[* TO 50000] AND !(RWAJ:0)',
+    );
+    expect(structured<Output>(result).notice).toContain(skips);
+    expect(text).toContain(skips);
+  });
+
+  it("reads a leverage-ratio filer's unreported risk-based capital as null beside its tier 1 capital, on both surfaces", async () => {
+    const portage = { NAME: 'PORTAGE COUNTY BANK', STALP: 'OH' };
+    withPanel({
+      '20260630': [
+        panelRow(10012, '20260630', portage, {
+          RBCT1J: 27221,
+          RBC: 0,
+          RWAJ: 0,
+          SCHA: 60016,
+          SCHF: 55961,
+        }),
+        panelRow(57701, '20260630', HARBOR, {
+          RBCT1J: 245100,
+          RBC: 262400,
+          RWAJ: 1810300,
+          SCHA: 0,
+          SCHF: 0,
+        }),
+      ],
+    });
+    const { result, text } = await run({
+      metrics: [
+        'tier1_capital',
+        'total_risk_based_capital',
+        'risk_weighted_assets',
+        'held_to_maturity_amortized_cost',
+        'held_to_maturity_fair_value',
+      ],
+      to_date: '2026Q2',
+    });
+    expect(pageRequests()[0]?.params.fields).toBe(
+      'CERT,NAME,STALP,REPDTE,RBCT1J,RBC,RWAJ,SCHA,SCHF',
+    );
+    const output = structured<Output>(result);
+    expect(output.rows.map((r) => [r.cert, r.values])).toEqual([
+      [
+        10012,
+        {
+          tier1_capital: 27221,
+          total_risk_based_capital: null,
+          risk_weighted_assets: null,
+          held_to_maturity_amortized_cost: 60016,
+          held_to_maturity_fair_value: 55961,
+        },
+      ],
+      [
+        57701,
+        {
+          tier1_capital: 245100,
+          total_risk_based_capital: 262400,
+          risk_weighted_assets: 1810300,
+          held_to_maturity_amortized_cost: 0,
+          held_to_maturity_fair_value: 0,
+        },
+      ],
+    ]);
+    expect(output.metric_definitions.map((d) => [d.metric, d.note])).toEqual([
+      ['tier1_capital', undefined],
+      ['total_risk_based_capital', ZERO_UNREPORTED_NOTE],
+      ['risk_weighted_assets', ZERO_UNREPORTED_NOTE],
+      ['held_to_maturity_amortized_cost', undefined],
+      ['held_to_maturity_fair_value', undefined],
+    ]);
+    expect(tableRows(text)).toEqual([
+      '| 10012 | PORTAGE COUNTY BANK | OH | 2026-06-30 | 27,221 | — | — | 60,016 | 55,961 |',
+      '| 57701 | EVERGREEN HARBOR BK | WA | 2026-06-30 | 245,100 | 262,400 | 1,810,300 | 0 | 0 |',
+    ]);
+    expect(text).toContain(
+      `- total_risk_based_capital: field RBC · unit usd_thousands · basis point_in_time — ${ZERO_UNREPORTED_NOTE}`,
+    );
+    expect(text).toContain(
+      '- tier1_capital: field RBCT1J · unit usd_thousands · basis point_in_time\n',
+    );
+  });
 
   it.each<[string, Input, string]>([
     [

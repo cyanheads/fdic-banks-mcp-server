@@ -8,14 +8,15 @@
  */
 
 import type { z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, rateLimited } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, rateLimited, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { createPacer } from '@cyanheads/mcp-ts-core/utils';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchInstitutionsTool } from '@/mcp-server/tools/definitions/search-institutions.tool.js';
 import { disposeFdicService } from '@/services/fdic/fdic-service.js';
 import { BRIDGE_BANK, FAILED_BANK, HARBOR_BANK, SOLO_BANK } from '../fixtures/fdic-records.js';
 import {
+  AlternatingSearch,
   envelope,
   FakeFdic,
   type FakeRequest,
@@ -23,6 +24,8 @@ import {
   hit,
   INDEX,
   installFakeService,
+  type ScriptedRead,
+  ScriptedSearch,
 } from '../helpers/fake-fdic.js';
 import { structured, textOf, toolError } from '../helpers/tool-results.js';
 
@@ -113,7 +116,14 @@ describe('query building', () => {
     );
     expect(next.institutions).toHaveLength(20);
     expect(next).not.toHaveProperty('next_offset');
-    expect(fake.requests.every((r) => Number(r.params.limit) <= 100)).toBe(true);
+    // Each tier is read in 10,000-match chunks at a multiple of 10,000, or only counted.
+    expect(
+      fake.requests.every(
+        (r) =>
+          r.params.limit === '0' ||
+          (r.params.limit === '10000' && Number(r.params.offset) % 10_000 === 0),
+      ),
+    ).toBe(true);
   });
   it('deduplicates before the CERT cap and separates deferred from missing on both surfaces', async () => {
     fake.on('institutions', () => true, envelope('institutions', []));
@@ -145,7 +155,7 @@ describe('query building', () => {
       'BKCLASS:("N" OR "NM" OR "SM" OR "SB" OR "SI" OR "SL" OR "OI" OR "NC")',
     );
   });
-  it('searches a name by relevance with status any: the active current-name tier and the rest, in parallel', async () => {
+  it('searches a name by relevance with status any: the active current-name tier’s first chunk and a count of the rest, in parallel', async () => {
     onNameSearch([HARBOR_BANK]);
     const { output } = await handle({ name: 'evergreen harbor' });
     const current = 'ACTIVE:1 AND NAME:*EVERGREEN* AND NAME:*HARBOR*';
@@ -154,7 +164,7 @@ describe('query building', () => {
         search: 'NAME:evergreen harbor',
         filters: current,
         fields: FIELDS,
-        limit: '20',
+        limit: '10000',
         offset: '0',
       },
     ]);
@@ -162,9 +172,7 @@ describe('query building', () => {
       {
         search: 'NAME:evergreen harbor',
         filters: `!(${current})`,
-        fields: FIELDS,
-        limit: '20',
-        offset: '0',
+        limit: '0',
       },
     ]);
     expect(fake.requests).toHaveLength(2);
@@ -200,7 +208,7 @@ describe('query building', () => {
     const { output } = await handle({ state: 'wa' });
     expect(pageParams()).toMatchObject({
       filters: 'STALP:"WA" AND ACTIVE:1',
-      sort_by: 'ASSET',
+      sort_by: 'ASSET,CERT',
       sort_order: 'DESC',
     });
     expect(pageParams()).not.toHaveProperty('search');
@@ -217,10 +225,12 @@ describe('query building', () => {
     expect(pageParams().filters).toContain(`STALP:"${code}"`);
   });
 
-  it('sends city as given and in title case, with quotes escaped', async () => {
+  it('sends city as given, in title case, and in each St./Saint spelling, with quotes escaped', async () => {
     fake.on('institutions', isPage, envelope('institutions', []));
     await handle({ city: 'st. louis' });
-    expect(pageParams().filters).toBe('CITY:("st. louis" OR "St. Louis") AND ACTIVE:1');
+    expect(pageParams().filters).toBe(
+      'CITY:("st. louis" OR "st louis" OR "saint louis" OR "St. Louis" OR "St Louis" OR "Saint Louis") AND ACTIVE:1',
+    );
 
     fake.requests.length = 0;
     await handle({ city: 'Seattle' });
@@ -296,18 +306,25 @@ describe('query building', () => {
     expect(pageParams().filters).toBe('RSSDHCR:"3456789"');
   });
 
-  it('sorts by name A–Z, and falls back from relevance to assets when no name is given', async () => {
+  it('sorts by name A–Z, and falls back from relevance to assets when no name is given, ties by CERT', async () => {
     fake.on('institutions', isPage, envelope('institutions', []));
     await handle({ state: 'WA', sort: 'name' });
-    expect(pageParams()).toMatchObject({ sort_by: 'NAME', sort_order: 'ASC' });
+    expect(pageParams()).toMatchObject({ sort_by: 'NAME,CERT', sort_order: 'ASC' });
 
     fake.requests.length = 0;
     await handle({ state: 'WA', sort: 'relevance' });
-    expect(pageParams()).toMatchObject({ sort_by: 'ASSET', sort_order: 'DESC' });
+    expect(pageParams()).toMatchObject({ sort_by: 'ASSET,CERT', sort_order: 'DESC' });
 
     fake.requests.length = 0;
     await handle({ name: 'harbor', sort: 'assets_desc' });
-    expect(pageParams()).toMatchObject({ sort_by: 'ASSET', sort_order: 'DESC' });
+    expect(pageParams()).toMatchObject({ sort_by: 'ASSET,CERT', sort_order: 'DESC' });
+  });
+
+  it('describes the Saint spelling of a city, a next_offset walk returning each match once, and the CERT tiebreak in the input schema', () => {
+    const { city, offset, sort } = tool.input.shape;
+    expect(city.description).toContain('St. Louis finds Saint Louis');
+    expect(offset.description).toContain('Following next_offset returns each match once');
+    expect(sort.description).toContain('assets_desc and name break ties by CERT');
   });
 
   it('treats blank and whitespace-only strings and blank numbers as unset', async () => {
@@ -326,7 +343,7 @@ describe('query building', () => {
     expect(pageParams()).toEqual({
       filters: 'ACTIVE:1',
       fields: expect.any(String),
-      sort_by: 'ASSET',
+      sort_by: 'ASSET,CERT',
       sort_order: 'DESC',
       limit: '20',
       offset: '0',
@@ -434,8 +451,9 @@ describe('relevance order', () => {
     expect(text).toContain('## 8 institutions match (status filter: any)');
     expect(text.indexOf('CERT 1003')).toBeLessThan(text.indexOf('CERT 2001'));
     expect(text).toContain('Next page: offset 4.');
-    expect(tierParams(isLeadTier)).toMatchObject([{ offset: '0', limit: '4' }]);
-    expect(tierParams(isRestTier)).toMatchObject([{ offset: '0', limit: '4' }]);
+    // The lead tier's first chunk stands in for its count; the rest tier is counted, then read.
+    expect(tierParams(isLeadTier)).toMatchObject([{ offset: '0', limit: '10000' }]);
+    expect(tierParams(isRestTier)).toMatchObject([{ limit: '0' }, { offset: '0', limit: '10000' }]);
   });
 
   it('continues across the tier boundary, starting the rest tier where the lead tier ran out', async () => {
@@ -443,8 +461,8 @@ describe('relevance order', () => {
     const { output } = await handle({ name: 'harbor', limit: 4, offset: 2 });
     expect(certsOf(output.institutions)).toEqual([1003, 2001, 2002, 2003]);
     expect(output.next_offset).toBe(6);
-    expect(tierParams(isLeadTier)).toMatchObject([{ offset: '2', limit: '4' }]);
-    expect(tierParams(isRestTier)).toMatchObject([{ offset: '0', limit: '3' }]);
+    expect(tierParams(isLeadTier)).toMatchObject([{ limit: '0' }, { offset: '0', limit: '10000' }]);
+    expect(tierParams(isRestTier)).toMatchObject([{ limit: '0' }, { offset: '0', limit: '10000' }]);
   });
 
   it('pages inside the rest tier by the lead tier’s total, ending on the last match', async () => {
@@ -454,7 +472,9 @@ describe('relevance order', () => {
     expect(output.total).toBe(8);
     expect(output).not.toHaveProperty('next_offset');
     expect(enrichment).toEqual({ effective_limit: 4 });
-    expect(tierParams(isRestTier)).toMatchObject([{ offset: '1', limit: '4' }]);
+    // The page does not reach the lead tier, so that tier is only counted.
+    expect(tierParams(isLeadTier)).toEqual([expect.objectContaining({ limit: '0' })]);
+    expect(tierParams(isRestTier)).toMatchObject([{ limit: '0' }, { offset: '0', limit: '10000' }]);
   });
 
   it('answers an offset past both tiers with the past-end notice', async () => {
@@ -466,6 +486,8 @@ describe('relevance order', () => {
       effective_limit: 20,
       notice: 'offset 8 is past the last of 8 matches; lower offset or omit it.',
     });
+    // A page that reaches neither tier only counts them.
+    expect(fake.requests.map((r) => r.params.limit)).toEqual(['0', '0']);
   });
 
   it.each<[string, readonly Row[], readonly Row[], number[]]>([
@@ -608,6 +630,548 @@ describe('pagination', () => {
       notice: 'offset 60 is past the last of 45 matches; lower offset or omit it.',
     });
   });
+
+  it('offers no next_offset when a page inside the count comes back empty, so a walk cannot loop on it', async () => {
+    fake.on('institutions', isPage, envelope('institutions', [], { total: 45 }));
+    const { result, text } = await run({ state: 'WA', offset: 30 });
+    expect(structured(result).institutions).toEqual([]);
+    expect(structured(result)).not.toHaveProperty('next_offset');
+    expect(text).not.toContain('Next page: offset');
+  });
+});
+
+describe('paging a name search whose match scores alternate', () => {
+  const CAVEAT =
+    'This page can repeat or skip matches from earlier pages of this search: FDIC returned them in a different order this time, and the earlier order could not be restored. Set sort to name or assets_desc for an order that holds on every call.';
+
+  /** A copy of `rows` with each position in `at` swapped with the one after it. */
+  function swapped(rows: readonly Row[], at: readonly number[]): Row[] {
+    const out = [...rows];
+    for (const i of at) [out[i], out[i + 1]] = [out[i + 1] as Row, out[i] as Row];
+    return out;
+  }
+  const certRange = (from: number, count: number) =>
+    Array.from({ length: count }, (_, i) => from + i);
+  const certsOf = (output: { institutions: readonly { cert: number }[] }) =>
+    output.institutions.map((i) => i.cert);
+  /** A score-ordered read is a 10,000-match chunk at a multiple of 10,000, or a count. */
+  const chunkOrCount = (p: Readonly<Record<string, string>>) => {
+    if (p.limit === '0') return;
+    expect(p).toMatchObject({ limit: '10000', fields: FIELDS });
+    expect(Number(p.offset) % 10_000).toBe(0);
+  };
+
+  /**
+   * Follows next_offset from `start` with each of `limits` in turn, failing unless the
+   * walk ends on the last; `between` runs before every page after the first.
+   */
+  async function walkPages(
+    input: Input,
+    limits: readonly number[],
+    options: { between?: () => void; start?: number } = {},
+  ): Promise<{ certs: number[]; notice: string | undefined }[]> {
+    const pages: { certs: number[]; notice: string | undefined }[] = [];
+    let offset: number | undefined = options.start ?? 0;
+    for (const limit of limits) {
+      if (offset === undefined) break;
+      if (pages.length) options.between?.();
+      const { output, enrichment } = await handle({ ...input, limit, offset });
+      const { notice } = enrichment;
+      pages.push({
+        certs: certsOf(output),
+        notice: typeof notice === 'string' ? notice : undefined,
+      });
+      offset = output.next_offset;
+    }
+    expect(offset).toBeUndefined();
+    expect(pages).toHaveLength(limits.length);
+    return pages;
+  }
+
+  async function walk(input: Input, limits: readonly number[]): Promise<number[]> {
+    return (await walkPages(input, limits)).flatMap((page) => page.certs);
+  }
+
+  /** Every read after a block's first comes back in FDIC's other order: A, B, A, …. */
+  const flip = ({ n }: ScriptedRead) => n % 2;
+
+  it('walks across the lead/rest boundary returning every CERT once, in one large call’s order', async () => {
+    const lead = certRange(1001, 9).map((cert) => ({ ...HARBOR_BANK, CERT: cert }));
+    const rest = certRange(2001, 14).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    // The walk's pages end at 7, 12, 16, and 22; order B swaps the matches on either side of each.
+    const leadSearch = new AlternatingSearch([lead, swapped(lead, [6])], { check: chunkOrCount });
+    const restSearch = new AlternatingSearch([rest, swapped(rest, [2, 6, 12])], {
+      check: chunkOrCount,
+    });
+    fake
+      .on('institutions', isRestTier, restSearch.respond)
+      .on('institutions', isLeadTier, leadSearch.respond);
+
+    const { output: large } = await handle({ name: 'harbor', limit: 100 });
+    const certs = await walk({ name: 'harbor' }, [7, 5, 4, 6, 9]);
+    expect(large.total).toBe(23);
+    expect(certs).toEqual(certsOf(large));
+    expect(new Set(certs).size).toBe(23);
+    leadSearch.assertClean();
+    restSearch.assertClean();
+  });
+
+  it('walks a status inactive name search, one search in score order, returning every CERT once', async () => {
+    const rows = certRange(2001, 20).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    const search = new AlternatingSearch([rows, swapped(rows, [5, 10, 15])], {
+      check: chunkOrCount,
+    });
+    fake.on('institutions', isPage, search.respond);
+    const input = { name: 'harbor', status: 'inactive' } as const;
+
+    const { output: large } = await handle({ ...input, limit: 100 });
+    const certs = await walk(input, [6, 5, 5, 5]);
+    expect(certs).toEqual(certsOf(large));
+    expect(new Set(certs).size).toBe(20);
+    expect(fake.requests.every((r) => r.params.filters === 'ACTIVE:0')).toBe(true);
+    search.assertClean();
+  });
+
+  it.each<[Input['sort'], string, Record<string, unknown>[]]>([
+    [
+      'name',
+      'NAME',
+      ['Alder Bank', ...Array(4).fill('Harbor Bank'), ...Array(3).fill('Pine Bank'), 'Zephyr'].map(
+        (NAME) => ({ NAME }),
+      ),
+    ],
+    [
+      'assets_desc',
+      'ASSET',
+      [900, ...Array(4).fill(500), ...Array(3).fill(300), 100].map((ASSET) => ({ ASSET })),
+    ],
+  ])(
+    'walks a %s sort whose ties straddle short and changing pages, breaking ties by CERT',
+    async (sort, field, values) => {
+      const rows = values.map((value, i) => ({ ...HARBOR_BANK, ...value, CERT: 3001 + i }));
+      // Order B reverses every tie; short reads end pages inside the 4-way and 3-way ties.
+      const search = new AlternatingSearch([rows, [...rows].reverse()], { shortPages: true });
+      fake.on('institutions', isPage, search.respond);
+
+      const { output: large } = await handle({ name: 'harbor', sort, limit: 100 });
+      const certs = await walk({ name: 'harbor', sort }, [3, 3, 3, 3]);
+      expect(certs).toEqual(certsOf(large));
+      expect(new Set(certs).size).toBe(9);
+      expect(new Set(fake.requests.map((r) => r.params.sort_by))).toEqual(
+        new Set([`${field},CERT`]),
+      );
+    },
+  );
+
+  it('answers a page the same fresh and after other names, statuses, and sorts were searched', async () => {
+    const lead = certRange(1001, 3).map((cert) => ({ ...HARBOR_BANK, CERT: cert }));
+    const rest = certRange(2001, 5).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    const cove = certRange(4001, 6).map((cert) => ({ ...SOLO_BANK, CERT: cert }));
+    async function page(prime: readonly Input[]) {
+      fake = new FakeFdic()
+        .on(
+          'institutions',
+          (p) => p.search === 'NAME:cove',
+          new AlternatingSearch([cove, [...cove].reverse()]).respond,
+        )
+        .on(
+          'institutions',
+          (p) => p.sort_by !== undefined,
+          new AlternatingSearch([
+            [...lead, ...rest],
+            [...rest, ...lead],
+          ]).respond,
+        )
+        .on(
+          'institutions',
+          (p) => p.filters === 'ACTIVE:0',
+          new AlternatingSearch([rest, [...rest].reverse()]).respond,
+        )
+        .on(
+          'institutions',
+          isRestTier,
+          new AlternatingSearch([rest, swapped(rest, [0, 2])]).respond,
+        )
+        .on('institutions', isLeadTier, new AlternatingSearch([lead, swapped(lead, [1])]).respond);
+      installFakeService(fake);
+      for (const input of prime) await handle(input);
+      return (await run({ name: 'harbor', offset: 2, limit: 4 })).result;
+    }
+
+    const fresh = await page([]);
+    const primed = await page([
+      { name: 'cove' },
+      { name: 'cove', offset: 2, limit: 3 },
+      { name: 'harbor', status: 'inactive' },
+      { name: 'harbor', sort: 'name' },
+      { name: 'harbor', sort: 'assets_desc', offset: 3 },
+    ]);
+    expect(structured<Output>(fresh)).toMatchObject({ total: 8, next_offset: 6 });
+    expect(primed.structuredContent).toEqual(fresh.structuredContent);
+    expect(textOf(primed)).toBe(textOf(fresh));
+  });
+
+  it('reads past a tier’s first block with no caveat when its blocks line up, on both surfaces', async () => {
+    const rows = certRange(100_000, 10_010).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    fake.on('institutions', isPage, paged(rows));
+    const input = { name: 'harbor', status: 'inactive' } as const;
+
+    const inside = structured<Output>((await run({ ...input, offset: 9_980, limit: 10 })).result);
+    expect(inside.notice).toBe(
+      'Showing matches 9981–9990 of 10010; pass offset 9990 for the next page, or narrow the filters.',
+    );
+
+    const { result, text } = await run({ ...input, offset: 9_995, limit: 10 });
+    const output = structured<Output>(result);
+    expect(certsOf(output)).toEqual(certRange(109_995, 10));
+    expect(output).toMatchObject({ total: 10_010, next_offset: 10_005, truncated: true });
+    const notice =
+      'Showing matches 9996–10005 of 10010; pass offset 10005 for the next page, or narrow the filters.';
+    expect(output.notice).toBe(notice);
+    expect(text).toContain(`> ${notice}`);
+    expect(text).not.toContain(CAVEAT);
+    expect(fake.requests.map((r) => r.params.offset)).toContain('10000');
+
+    const last = structured<Output>((await run({ ...input, offset: 10_005, limit: 10 })).result);
+    expect(certsOf(last)).toEqual(certRange(110_005, 5));
+    expect(last).not.toHaveProperty('next_offset');
+    expect(last).not.toHaveProperty('notice');
+  });
+
+  it('cuts one page across a lead-tier block seam and the tier boundary, and deep into the rest tier’s second block', async () => {
+    const lead = certRange(1, 10_005).map((cert) => ({ ...HARBOR_BANK, CERT: cert }));
+    const rest = certRange(200_001, 10_010).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    onNameSearch(lead, rest);
+
+    const across = structured<Output>(
+      (await run({ name: 'harbor', offset: 9_998, limit: 10 })).result,
+    );
+    expect(certsOf(across)).toEqual([...certRange(9_999, 7), ...certRange(200_001, 3)]);
+    expect(across).toMatchObject({ total: 20_015, next_offset: 10_008 });
+    expect(across.notice).toBe(
+      'Showing matches 9999–10008 of 20015; pass offset 10008 for the next page, or narrow the filters.',
+    );
+    expect(tierParams(isLeadTier).map((p) => [p.limit, p.offset])).toEqual([
+      ['0', undefined],
+      ['10000', '0'],
+      ['10000', '10000'],
+    ]);
+
+    const deep = structured<Output>(
+      (await run({ name: 'harbor', offset: 20_010, limit: 10 })).result,
+    );
+    expect(certsOf(deep)).toEqual(certRange(210_006, 5));
+    expect(deep).not.toHaveProperty('next_offset');
+    expect(deep).not.toHaveProperty('notice');
+    expect(tierParams(isRestTier).map((p) => [p.limit, p.offset])).toEqual([
+      ['0', undefined],
+      ['10000', '0'],
+      ['10000', '10000'],
+    ]);
+  });
+
+  it('still answers offset 10000 with limit 10000, clamped to one page of the tier’s second block', async () => {
+    const rows = certRange(100_000, 10_010).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    fake.on('institutions', isPage, paged(rows));
+    const { result } = await run({
+      name: 'harbor',
+      status: 'inactive',
+      offset: 10_000,
+      limit: 10_000,
+    });
+    const output = structured<Output>(result);
+    expect(certsOf(output)).toEqual(certRange(110_000, 10));
+    expect(output.total).toBe(10_010);
+    expect(output).not.toHaveProperty('next_offset');
+  });
+
+  it.each<[string, { cacheTtlSeconds?: number }, string]>([
+    ['the response cache is off', { cacheTtlSeconds: 0 }, 'Harbor Bank'],
+    ['a block is larger than one cache entry', {}, 'x'.repeat(900)],
+  ])(
+    'keeps the first read’s order on a later page when %s and FDIC reads the block the other way',
+    async (_label, options, NAME) => {
+      installFakeService(fake, options);
+      const rows = certRange(1, 10_000).map((cert) => ({ ...FAILED_BANK, NAME, CERT: cert }));
+      const search = new ScriptedSearch([rows, [...rows].reverse()], flip, {
+        check: chunkOrCount,
+      });
+      fake.on('institutions', isPage, search.respond);
+      const input = { name: 'harbor', status: 'inactive' } as const;
+
+      const first = structured<Output>((await run(input)).result);
+      expect(certsOf(first)).toEqual(certRange(1, 20));
+      expect(first.notice).toBe(
+        'Showing matches 1–20 of 10000; pass offset 20 for the next page, or narrow the filters.',
+      );
+      const { result, text } = await run({ ...input, offset: 9_990 });
+      const last = structured<Output>(result);
+      expect(certsOf(last)).toEqual(certRange(9_991, 10));
+      expect(last).not.toHaveProperty('next_offset');
+      expect(last).not.toHaveProperty('notice');
+      expect(text).not.toContain(CAVEAT);
+      // One read per page; the second came back reversed and was put back in the first's order.
+      expect(search.reads(0)).toBe(2);
+      search.assertClean();
+    },
+  );
+
+  it('returns every CERT once when blocks are read again after their cache entries expire and FDIC answers the other way', async () => {
+    let clock = 1_000_000;
+    installFakeService(fake, { cacheTtlSeconds: 60, now: () => clock });
+    const lead = certRange(1001, 9).map((cert) => ({ ...HARBOR_BANK, CERT: cert }));
+    const rest = certRange(2001, 14).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    const leadSearch = new ScriptedSearch([lead, swapped(lead, [6])], flip, {
+      check: chunkOrCount,
+    });
+    const restSearch = new ScriptedSearch([rest, swapped(rest, [2, 6, 12])], flip, {
+      check: chunkOrCount,
+    });
+    fake
+      .on('institutions', isRestTier, restSearch.respond)
+      .on('institutions', isLeadTier, leadSearch.respond);
+    const expire = () => {
+      clock += 61_000;
+    };
+
+    const { output: large } = await handle({ name: 'harbor', limit: 100 });
+    expire();
+    const pages = await walkPages({ name: 'harbor' }, [7, 5, 4, 6, 9], { between: expire });
+    const certs = pages.flatMap((page) => page.certs);
+    expect(certs).toEqual(certsOf(large));
+    expect(new Set(certs).size).toBe(23);
+    expect(pages.map((page) => page.notice?.includes(CAVEAT) ?? false)).toEqual(
+      Array(5).fill(false),
+    );
+    // Each page read the blocks it reached once more; the reversed reads cost no extra request.
+    expect([leadSearch.reads(0), restSearch.reads(0)]).toEqual([3, 5]);
+    leadSearch.assertClean();
+    restSearch.assertClean();
+  });
+
+  describe('across a 10,000-match seam', () => {
+    const rows = certRange(100_000, 10_010).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    /** Order B moves the matches on either side of the seam across it. */
+    const orders = [rows, swapped(rows, [9_999])] as const;
+    const input = { name: 'harbor', status: 'inactive' } as const;
+
+    it.each<[string, number[]]>([
+      ['pages that end at the seam', [5, 5, 5, 5]],
+      ['a page that straddles it', [7, 7, 6]],
+    ])(
+      'returns every CERT once when FDIC first reads the second block the other way, through %s',
+      async (_label, limits) => {
+        const search = new ScriptedSearch(
+          orders,
+          ({ n, offset }) => (offset === 10_000 && n === 0 ? 1 : 0),
+          { check: chunkOrCount },
+        );
+        fake.on('institutions', isPage, search.respond);
+
+        const pages = await walkPages(input, limits, { start: 9_990 });
+        expect(pages.flatMap((page) => page.certs)).toEqual(certRange(109_990, 20));
+        expect(pages.map((page) => page.notice?.includes(CAVEAT) ?? false)).toEqual(
+          limits.map(() => false),
+        );
+        // The second block was read once more, until it shared no match with the first.
+        expect([search.reads(0), search.reads(10_000)]).toEqual([1, 2]);
+        search.assertClean();
+      },
+    );
+
+    it('returns every CERT once when the rest tier’s second block comes back the other way first', async () => {
+      const lead = certRange(1, 3).map((cert) => ({ ...HARBOR_BANK, CERT: cert }));
+      const restSearch = new ScriptedSearch(
+        orders,
+        ({ n, offset }) => (offset === 10_000 && n === 0 ? 1 : 0),
+        { check: chunkOrCount },
+      );
+      fake
+        .on('institutions', isRestTier, restSearch.respond)
+        .on('institutions', isLeadTier, paged(lead));
+
+      const pages = await walkPages({ name: 'harbor' }, [7, 7, 6], { start: 9_993 });
+      expect(pages.flatMap((page) => page.certs)).toEqual(certRange(109_990, 20));
+      expect(pages.some((page) => page.notice?.includes(CAVEAT))).toBe(false);
+      expect(restSearch.reads(10_000)).toBe(2);
+      restSearch.assertClean();
+    });
+
+    it('caveats a page whose block FDIC never reads in an order that lines up, after a bounded number of reads, then keeps that order', async () => {
+      const search = new ScriptedSearch(orders, ({ offset }) => (offset === 10_000 ? 1 : 0), {
+        check: chunkOrCount,
+      });
+      fake.on('institutions', isPage, search.respond);
+
+      await handle({ ...input, offset: 9_990, limit: 10 });
+      const { result, text } = await run({ ...input, offset: 10_000, limit: 5 });
+      const output = structured<Output>(result);
+      // As FDIC answered it: the first match repeats the last of the page before.
+      expect(certsOf(output)).toEqual([109_999, 110_001, 110_002, 110_003, 110_004]);
+      const notice = `Showing matches 10001–10005 of 10010; pass offset 10005 for the next page, or narrow the filters. ${CAVEAT}`;
+      expect(output.notice).toBe(notice);
+      expect(text).toContain(`> ${notice}`);
+      // The first read and six more.
+      expect(search.reads(10_000)).toBe(7);
+
+      const { output: next, enrichment } = await handle({ ...input, offset: 10_005, limit: 5 });
+      expect(certsOf(next)).toEqual(certRange(110_005, 5));
+      expect(enrichment).toEqual({ effective_limit: 5 });
+      expect(search.reads(10_000)).toBe(7);
+      search.assertClean();
+    });
+
+    it('stops reading a block again once the call’s time left would not fit another read, and caveats the page', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const search = new ScriptedSearch(orders, ({ offset }) => (offset === 10_000 ? 1 : 0));
+        fake.on('institutions', isPage, (request) => {
+          // Each read of the second block takes 10 s on the clock the call's budget runs on.
+          if (request.params.offset === '10000') vi.setSystemTime(Date.now() + 10_000);
+          return search.respond(request);
+        });
+
+        await handle({ ...input, offset: 9_990, limit: 10 });
+        const { enrichment } = await handle({ ...input, offset: 10_000, limit: 5 });
+        expect(enrichment.notice).toContain(CAVEAT);
+        // Against the 45 s budget, two more reads left 15 s: less than twice a 10 s read.
+        expect(search.reads(10_000)).toBe(3);
+        search.assertClean();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('serves the block it holds, with the caveat, when reading it again fails, and keeps that order', async () => {
+      const search = new ScriptedSearch(orders, ({ n, offset }) =>
+        offset !== 10_000
+          ? 0
+          : n === 0
+            ? 1
+            : serviceUnavailable('Fetch failed. Status: 503', { status: 503 }),
+      );
+      fake.on('institutions', isPage, search.respond);
+      await handle({ ...input, offset: 9_990, limit: 10 });
+
+      vi.useFakeTimers();
+      try {
+        const pending = handle({ ...input, offset: 10_000, limit: 5 });
+        await vi.runAllTimersAsync();
+        const { output, enrichment } = await pending;
+        expect(certsOf(output)).toEqual([109_999, 110_001, 110_002, 110_003, 110_004]);
+        expect(enrichment.notice).toBe(
+          `Showing matches 10001–10005 of 10010; pass offset 10005 for the next page, or narrow the filters. ${CAVEAT}`,
+        );
+        // The first read, then three attempts at reading it again.
+        expect(search.reads(10_000)).toBe(4);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const { enrichment } = await handle({ ...input, offset: 10_005, limit: 5 });
+      expect(enrichment).toEqual({ effective_limit: 5 });
+      expect(search.reads(10_000)).toBe(4);
+      search.assertClean();
+    });
+  });
+
+  it('takes a block’s order from FDIC’s newer index build once, caveating only that page, and reads past an older one', async () => {
+    let clock = 1_000_000;
+    installFakeService(fake, { cacheTtlSeconds: 60, now: () => clock });
+    const rows = certRange(3001, 30).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    // The rebuilt index swaps 3005 for 3999 and orders the matches the other way.
+    const rebuilt = rows.map((row) => (row.CERT === 3005 ? { ...row, CERT: 3999 } : row)).reverse();
+    // Reads: the old build, the new one, an old answer again, then the new one.
+    const search = new ScriptedSearch([rows, rebuilt], ({ n }) => [0, 1, 0, 1][n] ?? 1, {
+      check: chunkOrCount,
+      dataAsOf: [INDEX.institutions.createTimestamp, '2026-09-25T11:40:12Z'],
+    });
+    fake.on('institutions', isPage, search.respond);
+
+    const pages = await walkPages({ name: 'harbor', status: 'inactive' }, [10, 10, 10], {
+      between: () => {
+        clock += 61_000;
+      },
+    });
+    expect(pages.map((page) => page.certs)).toEqual([
+      certRange(3001, 10),
+      rebuilt.slice(10, 20).map((row) => row.CERT),
+      rebuilt.slice(20, 30).map((row) => row.CERT),
+    ]);
+    expect(pages.map((page) => page.notice?.includes(CAVEAT) ?? false)).toEqual([
+      false,
+      true,
+      false,
+    ]);
+    expect(search.reads(0)).toBe(4);
+    search.assertClean();
+  });
+
+  it.each<[string, Input]>([
+    ['another name', { name: 'cove', status: 'inactive' }],
+    ['another status', { name: 'harbor', status: 'any' }],
+    ['another filter', { name: 'harbor', status: 'inactive', state: 'WA' }],
+  ])('never puts a page of %s in the order read for a different search', async (_label, other) => {
+    const rows = certRange(4001, 20).map((cert) => ({ ...FAILED_BANK, CERT: cert }));
+    const first = new ScriptedSearch([rows], () => 0);
+    const second = new ScriptedSearch([[...rows].reverse()], () => 0);
+    fake
+      .on(
+        'institutions',
+        (p) => p.search === 'NAME:harbor' && p.filters === 'ACTIVE:0',
+        first.respond,
+      )
+      .on('institutions', isPage, second.respond);
+
+    const { output: recorded } = await handle({
+      name: 'harbor',
+      status: 'inactive',
+      offset: 2,
+      limit: 5,
+    });
+    expect(certsOf(recorded)).toEqual(certRange(4003, 5));
+    const { output } = await handle({ ...other, offset: 2, limit: 5 });
+    expect(certsOf(output)).toEqual([4018, 4017, 4016, 4015, 4014]);
+  });
+
+  it('adds no paging caveat when one uncached read holds every match', async () => {
+    installFakeService(fake, { cacheTtlSeconds: 0 });
+    onNameSearch([HARBOR_BANK], [FAILED_BANK]);
+    const { enrichment } = await handle({ name: 'harbor' });
+    expect(enrichment).toEqual({ effective_limit: 20 });
+  });
+});
+
+describe('cancellation', () => {
+  it.each<[string, Input]>([
+    ['on the first page', { name: 'harbor' }],
+    ['past the first page', { name: 'harbor', offset: 30 }],
+    ['on a status inactive search', { name: 'harbor', status: 'inactive', offset: 30 }],
+  ])(
+    'reports a name search cancelled while its matches are read %s as cancelled, sending nothing after',
+    async (_label, input) => {
+      const rows = Array.from({ length: 60 }, (_, i) => ({ ...FAILED_BANK, CERT: i + 1 }));
+      const counts = paged(rows);
+      fake.on('institutions', isPage, (request) =>
+        request.params.limit === '0'
+          ? counts(request)
+          : new Promise((_resolve, reject) => {
+              request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+                once: true,
+              });
+            }),
+      );
+      const controller = new AbortController();
+      const pending = runToolContract(tool, input, { context: { signal: controller.signal } });
+      await vi.waitFor(() => expect(fake.requests.some((r) => r.params.limit !== '0')).toBe(true));
+      const sent = fake.requests.length;
+      controller.abort(new DOMException('caller went away', 'AbortError'));
+
+      const result = await pending;
+      expect(toolError(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(fake.requests).toHaveLength(sent);
+    },
+  );
 });
 
 describe('zero-hit guidance', () => {
@@ -615,7 +1179,7 @@ describe('zero-hit guidance', () => {
     fake.on('institutions', isPage, envelope('institutions', []));
     const { enrichment } = await handle({ state: 'WA', city: 'Seatle', min_assets: 1000 });
     expect(enrichment.notice).toBe(
-      'Only active institutions were searched; set status to any to include closed, merged, and failed institutions. City matching is exact as FDIC spells it (for example Seattle, St. Louis); drop city and filter by state to browse. Asset bounds are in thousands of dollars (1000000 = $1 billion).',
+      'Only active institutions were searched; set status to any to include closed, merged, and failed institutions. City names match as FDIC spells them (Seattle; St. Louis also finds Saint Louis); drop city and filter by state to browse. Asset bounds are in thousands of dollars (1000000 = $1 billion).',
     );
   });
 
@@ -788,6 +1352,28 @@ describe('errors', () => {
     expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
     expect(error.data).toMatchObject({ reason: 'upstream_rate_limited', retryAfter: 20 });
     expect(text).toContain('Recovery: FDIC is throttling requests; wait 20 seconds before calling');
+  });
+
+  it('reports a 429 on a block read past the first page as upstream_rate_limited, not as an empty page', async () => {
+    fake
+      .on('institutions', (p) => p.limit === '0', envelope('institutions', [], { total: 60 }))
+      .on(
+        'institutions',
+        (p) => p.limit === '10000',
+        () => {
+          throw rateLimited('Fetch failed. Status: 429', { status: 429, retryAfter: '20' });
+        },
+      );
+    const { result, text } = await run({ name: 'harbor', offset: 30 });
+    const error = toolError(result);
+    expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(error.data).toMatchObject({ reason: 'upstream_rate_limited', retryAfter: 20 });
+    expect(text).toContain('reason upstream_rate_limited');
+    expect(text).toContain('Recovery: FDIC is throttling requests; wait 20 seconds before calling');
+    // Past offset 0 both tiers are only counted, so the read that failed is a block the page is cut from.
+    expect(fake.requests.filter((r) => r.params.limit === '0')).toHaveLength(2);
+    const blockRead = fake.requests.find((r) => r.params.limit === '10000');
+    expect(blockRead?.params.offset).toBe('0');
   });
 
   it.each<[string, Record<string, unknown>]>([

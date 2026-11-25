@@ -17,6 +17,7 @@ import {
   stagedNotice,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { callBudget, getFdicService } from '@/services/fdic/fdic-service.js';
+import { countyName } from '@/services/fdic/query-builder.js';
 import type { BranchRecord, SodBucket, SodGeography } from '@/services/fdic/types.js';
 import { normalizeState } from '@/services/fdic/us-states.js';
 import { blankAsUnset, stateInput } from '../input-schemas.js';
@@ -76,10 +77,10 @@ export const getDepositsTool = tool('fdic_get_deposits', {
     ),
     state: stateInput('Branch state: two-letter code in any case or full name.'),
     county: blankAsUnset(z.string().max(50).optional()).describe(
-      'County as FDIC spells it (King, not King County — a trailing " County" is stripped), up to 50 characters; matched exactly as given or in title case, with a hyphen, apostrophe, or space between words also tried the other ways FDIC records it; requires state.',
+      "County as FDIC names it, up to 50 characters; requires state. A trailing County is dropped in any state, and a county-equivalent word only in the states whose counties it names: Parish in LA; City and Borough, Borough, Census Area, or Municipality in AK; Municipality or Municipio in PR; Municipality in MP; Planning Region in CT (Orleans Parish matches Orleans). Elsewhere the word stays part of the name. A name ending in City or (City) is sent as Name (City) and Name City, FDIC's spellings for the independent cities of VA, MD, MO, and NV (Richmond City matches Richmond (City); Richmond alone is Richmond County). Connecticut's counties are planning regions from 2023 (Capitol), so compare 2022 with 2023 there by city or msa_code. Matched exactly as given or in title case, with St./St/Saint, Ste./Ste/Sainte, Ft./Ft/Fort, or Mt./Mt/Mount and a hyphen, apostrophe, or space between words also tried the other ways FDIC records them.",
     ),
     city: blankAsUnset(z.string().max(50).optional()).describe(
-      'Branch city as FDIC spells it (Seattle, St. Louis), up to 50 characters; matched exactly as given or in title case, with a hyphen, apostrophe, or space between words also tried the other ways FDIC records it (Winston-Salem finds Winston Salem); requires state.',
+      'Branch city as FDIC spells it (Seattle), up to 50 characters; matched exactly as given or in title case, with St./St/Saint, Ste./Ste/Sainte, Ft./Ft/Fort, or Mt./Mt/Mount (St. Louis finds Saint Louis) and a hyphen, apostrophe, or space between words (Winston-Salem finds Winston Salem) also tried the other ways FDIC records them; requires state.',
     ),
     zip: blankAsUnset(
       z
@@ -125,7 +126,9 @@ export const getDepositsTool = tool('fdic_get_deposits', {
         county: z
           .string()
           .optional()
-          .describe('County name as applied, with any trailing " County" removed.'),
+          .describe(
+            'County name as applied: County dropped, a county-equivalent word dropped in the states whose counties it names (Parish in LA, Borough in AK, …), and an independent city as Name (City).',
+          ),
         city: z.string().optional().describe('City name as given.'),
         zip: z.string().optional().describe('Five-digit ZIP code.'),
         msa_code: z.string().optional().describe('Five-digit CBSA code.'),
@@ -367,7 +370,9 @@ export const getDepositsTool = tool('fdic_get_deposits', {
     if (input.state !== undefined && state === undefined) {
       throw ctx.fail('invalid_state', `"${input.state}" is not a US state, DC, or territory.`);
     }
-    const county = input.county?.replace(/\s+county$/i, '');
+    // A county always has its state here (checked above); the state decides its suffix words.
+    const county =
+      state && input.county !== undefined ? countyName(input.county, state) : undefined;
     const geography: SodGeography | undefined = geographyGiven
       ? {
           ...(state ? { state } : {}),
@@ -619,7 +624,7 @@ export const getDepositsTool = tool('fdic_get_deposits', {
       }
       if (marketEmpty && (county || input.city)) {
         fragments.push(
-          "County and city names match exactly as FDIC spells them (for example King, St. Louis); drop the county or city and use state to browse the state's market.",
+          "County and city names match as FDIC spells them (King, Orleans, Richmond (City)): a trailing County is dropped in any state, and a county-equivalent word only where it names counties (Parish in LA; City and Borough, Borough, Census Area, or Municipality in AK; Municipality or Municipio in PR; Municipality in MP; Planning Region in CT). An independent city in VA, MD, MO, or NV is Name (City), and Connecticut's counties are planning regions from 2023 (Capitol), so a 2022-to-2023 comparison there uses city or msa_code. Drop the county or city and use state to browse the state's market.",
         );
       }
       if (marketEmpty && input.msa_code) {

@@ -1,6 +1,7 @@
 /**
- * @fileoverview Tests for the BankFind filter-clause builder: quoting, ranges, case
- * variants, name tokenization, and date conversions.
+ * @fileoverview Tests for the BankFind filter-clause builder: quoting, ranges, place
+ * name spellings (case, word joints, St./Saint-style groups), county names and their
+ * independent-city forms, name tokenization, and date conversions.
  * @module tests/services/fdic/query-builder.test
  */
 
@@ -11,6 +12,8 @@ import {
   CALENDAR_DATE_PATTERN,
   caseVariants,
   containsAllTokens,
+  countyName,
+  countyVariants,
   eq,
   isCalendarDate,
   isoToRepdte,
@@ -27,6 +30,7 @@ import {
   titleCase,
   usDateToIso,
 } from '@/services/fdic/query-builder.js';
+import type { StateCode } from '@/services/fdic/us-states.js';
 
 describe('clauses', () => {
   it('quotes strings with backslashes and quotes escaped, leaves numbers bare', () => {
@@ -80,8 +84,13 @@ describe('case handling', () => {
     expect(titleCase('winston-salem')).toBe('Winston-Salem');
   });
 
+  it('capitalizes a letter after an opening parenthesis', () => {
+    expect(titleCase('richmond (city)')).toBe('Richmond (City)');
+    expect(titleCase('ST. LOUIS (CITY)')).toBe('St. Louis (City)');
+  });
+
   it('sends the value as given plus its title case, deduplicated and whitespace-collapsed', () => {
-    expect(caseVariants('st.   louis')).toEqual(['st. louis', 'St. Louis']);
+    expect(caseVariants('n.   platte')).toEqual(['n. platte', 'N. Platte']);
     expect(caseVariants('  Seattle ')).toEqual(['Seattle']);
   });
 
@@ -104,6 +113,214 @@ describe('case handling', () => {
     ["Land O' Lakes", ["Land O' Lakes", 'Land O Lakes']],
   ])('adds the spellings FDIC records a place under for %j', (value, variants) => {
     expect(caseVariants(value)).toEqual(variants);
+  });
+
+  it.each([
+    // Word position: leading, mid, trailing.
+    ['St. Louis', ['St. Louis', 'St Louis', 'Saint Louis']],
+    [
+      'Port St. Lucie',
+      [
+        'Port St. Lucie',
+        'Port St Lucie',
+        'Port Saint Lucie',
+        'Port-St. Lucie',
+        'Port-St Lucie',
+        'Port-Saint Lucie',
+      ],
+    ],
+    [
+      'Rocky Mount',
+      ['Rocky Mount', 'Rocky Mt.', 'Rocky Mt', 'Rocky-Mount', 'Rocky-Mt.', 'Rocky-Mt'],
+    ],
+    // Every group, entered as each kind of member.
+    ['Saint Paul', ['Saint Paul', 'St. Paul', 'St Paul', 'Saint-Paul', 'St.-Paul', 'St-Paul']],
+    [
+      'St Charles',
+      ['St Charles', 'St. Charles', 'Saint Charles', 'St-Charles', 'St.-Charles', 'Saint-Charles'],
+    ],
+    ['Ste. Genevieve', ['Ste. Genevieve', 'Ste Genevieve', 'Sainte Genevieve']],
+    [
+      'Sainte Genevieve',
+      [
+        'Sainte Genevieve',
+        'Ste. Genevieve',
+        'Ste Genevieve',
+        'Sainte-Genevieve',
+        'Ste.-Genevieve',
+        'Ste-Genevieve',
+      ],
+    ],
+    ['Ft Worth', ['Ft Worth', 'Ft. Worth', 'Fort Worth', 'Ft-Worth', 'Ft.-Worth', 'Fort-Worth']],
+    ['Mt. Pleasant', ['Mt. Pleasant', 'Mt Pleasant', 'Mount Pleasant']],
+    // The word's case carries to its siblings; a title-case form takes the group's spelling.
+    ['st. louis', ['st. louis', 'st louis', 'saint louis', 'St. Louis', 'St Louis', 'Saint Louis']],
+    [
+      'FORT WORTH',
+      [
+        'FORT WORTH',
+        'FT. WORTH',
+        'FT WORTH',
+        'Fort Worth',
+        'Ft. Worth',
+        'Ft Worth',
+        'Fort-Worth',
+        'Ft.-Worth',
+        'Ft-Worth',
+      ],
+    ],
+    // Composed with each word-joint spelling.
+    [
+      "st. mary's",
+      [
+        "st. mary's",
+        "st mary's",
+        "saint mary's",
+        "St. Mary's",
+        "St Mary's",
+        "Saint Mary's",
+        "St. Mary'S",
+        "St Mary'S",
+        "Saint Mary'S",
+        'St. Mary S',
+        'St Mary S',
+        'Saint Mary S',
+        'St. Marys',
+        'St Marys',
+        'Saint Marys',
+      ],
+    ],
+  ])('also sends the group word in %j in each other spelling of its group', (value, variants) => {
+    expect(caseVariants(value)).toEqual(variants);
+  });
+
+  it.each([
+    ['Stanton', ['Stanton']],
+    ['Stone Mountain', ['Stone Mountain', 'Stone-Mountain']],
+    ['Fortuna', ['Fortuna']],
+    ['Fairmount', ['Fairmount']],
+    // Shaped like a dotted member with a letter for the dot (Ste., St., Mt.).
+    ['Stem', ['Stem']],
+    ['Sty Hill', ['Sty Hill', 'Sty-Hill']],
+    ['Mtn Home', ['Mtn Home', 'Mtn-Home']],
+  ])(
+    'leaves %j alone: a group spelling inside a longer word is no group word',
+    (value, variants) => {
+      expect(caseVariants(value)).toEqual(variants);
+    },
+  );
+
+  it('expands nothing in a value with two group words', () => {
+    expect(caseVariants('Fort St. John')).toEqual(['Fort St. John', 'Fort-St. John']);
+  });
+
+  it.each([
+    ['a non-ASCII letter', 'st. jérôme', ['st. jérôme', 'St. Jérôme']],
+    ['a double quote', 'st. "louis"', ['st. "louis"', 'St. "louis"']],
+    ['a comma', 'st. louis,', ['st. louis,', 'St. Louis,']],
+  ])(
+    'expands no group word in a value with %s, a character no FDIC place name with one uses',
+    (_label, value, variants) => {
+      expect(caseVariants(value)).toEqual(variants);
+    },
+  );
+
+  it('sends at most 15 spellings for a 50-character city', () => {
+    const city = "st. mary's ".padEnd(50, 'x');
+    expect(city).toHaveLength(50);
+    expect(caseVariants(city)).toHaveLength(15);
+  });
+});
+
+describe('county names', () => {
+  it.each([
+    ['King County', 'WA', 'King'],
+    ['orleans parish', 'LA', 'orleans'],
+    ['Juneau City and Borough', 'AK', 'Juneau'],
+    ['Kodiak Island Borough', 'AK', 'Kodiak Island'],
+    ['Bethel Census Area', 'AK', 'Bethel'],
+    ['Anchorage Municipality', 'AK', 'Anchorage'],
+    ['San Juan Municipio', 'PR', 'San Juan'],
+    ['Capitol Planning Region', 'CT', 'Capitol'],
+    ['  Orleans   Parish ', 'LA', 'Orleans'],
+    ['Parish', 'LA', 'Parish'],
+    ['Richmond', 'VA', 'Richmond'],
+    // County is dropped in any state.
+    ['Kodiak Island County', 'AK', 'Kodiak Island'],
+    ['Orleans County', 'NY', 'Orleans'],
+    // Every other word only in the states whose counties it names (rows above, and
+    // Municipality in PR and MP), and kept in a state where it names something else.
+    ['Ponce Municipality', 'PR', 'Ponce'],
+    ['Saipan Municipality', 'MP', 'Saipan'],
+    ['Orleans Parish', 'TX', 'Orleans Parish'],
+    ['Juneau City and Borough', 'WA', 'Juneau City and Borough'],
+    ['Columbia Borough', 'PA', 'Columbia Borough'],
+    ['Bethel Census Area', 'OR', 'Bethel Census Area'],
+    ['Monroeville Municipality', 'PA', 'Monroeville Municipality'],
+    ['San Juan Municipio', 'FL', 'San Juan Municipio'],
+    ['Capitol Planning Region', 'MA', 'Capitol Planning Region'],
+  ])('reads county %j in %s as %j', (value, state, name) => {
+    expect(countyName(value, state as StateCode)).toBe(name);
+  });
+
+  it.each([
+    ['Richmond City', 'VA', 'Richmond (City)'],
+    ['Richmond (City)', 'VA', 'Richmond (City)'],
+    ['richmond (city)', 'VA', 'richmond (City)'],
+    ['Carson city', 'NV', 'Carson (City)'],
+    ['James City County', 'VA', 'James (City)'],
+  ])('reads independent city %j in %s as %j', (value, state, name) => {
+    expect(countyName(value, state as StateCode)).toBe(name);
+  });
+
+  it('sends a Name (City) county as Name (City) and Name City, each in every spelling', () => {
+    expect(countyVariants('Carson (City)')).toEqual([
+      'Carson (City)',
+      'Carson City',
+      'Carson-City',
+    ]);
+    expect(countyVariants('richmond (City)')).toEqual([
+      'richmond (City)',
+      'Richmond (City)',
+      'richmond City',
+      'Richmond City',
+      'Richmond-City',
+    ]);
+  });
+
+  it('strips the suffix before the abbreviation spellings, so Saint Louis City finds St. Louis (City)', () => {
+    expect(countyVariants(countyName('Saint Louis City', 'MO' as StateCode))).toEqual([
+      'Saint Louis (City)',
+      'St. Louis (City)',
+      'St Louis (City)',
+      'Saint-Louis (City)',
+      'St.-Louis (City)',
+      'St-Louis (City)',
+      'Saint Louis City',
+      'St. Louis City',
+      'St Louis City',
+      'Saint-Louis-City',
+      'St.-Louis-City',
+      'St-Louis-City',
+    ]);
+    expect(countyVariants(countyName('Saint Louis County', 'MO' as StateCode))).toEqual([
+      'Saint Louis',
+      'St. Louis',
+      'St Louis',
+      'Saint-Louis',
+      'St.-Louis',
+      'St-Louis',
+    ]);
+  });
+
+  it('sends a bare county name as that name only, never widened to its independent city', () => {
+    expect(countyVariants('Richmond')).toEqual(['Richmond']);
+  });
+
+  it('sends at most 30 spellings for a 50-character county', () => {
+    const county = `${"st. mary's ".padEnd(45, 'x')} city`;
+    expect(county).toHaveLength(50);
+    expect(countyVariants(countyName(county, 'WA' as StateCode))).toHaveLength(30);
   });
 });
 

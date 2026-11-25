@@ -1,6 +1,6 @@
 /**
  * @fileoverview Row normalizers: coerce numeric strings, convert dates to ISO, drop
- * empty strings and FDIC's absence sentinels to absent, and null the ratios FDIC
+ * empty strings and FDIC's absence sentinels to absent, and null the fields FDIC
  * reports as `0` when unreported. `/history` rows become events: each exit's two
  * rows paired into one, classified by role and counterparty, newest first.
  * @module services/fdic/normalize
@@ -122,7 +122,10 @@ export function normalizeInstitution(row: FdicRow): InstitutionRecord {
   };
 }
 
-/** Metric values for one row: missing fields and zero-means-unreported ratios read `null`. */
+/**
+ * Metric values for one row: a missing field, or an exact `0` in a
+ * zero-means-unreported field, reads `null`.
+ */
 export function metricValues(
   data: Record<string, unknown>,
   metrics: readonly MetricName[],

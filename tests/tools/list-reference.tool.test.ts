@@ -69,9 +69,37 @@ describe('fdic_list_reference', () => {
       basis: 'year_to_date',
       in_default_set: false,
     });
-    expect(text).toContain('## FDIC reference — metrics (49 entries)');
+    expect(output.entries).toHaveLength(60);
+    expect(text).toContain('## FDIC reference — metrics (60 entries)');
     expect(text).toContain('in default set: yes');
     expect(text).toContain(`note: ${ZERO_UNREPORTED_NOTE}`);
+  });
+
+  it('lists the securities, capital-amount, and loan metrics outside the default set', async () => {
+    const { output, text } = await list('metrics');
+    expect(output.entries.find((e) => e.code === 'total_risk_based_capital')).toEqual({
+      code: 'total_risk_based_capital',
+      label: 'Total risk-based capital',
+      field: 'RBC',
+      unit: 'usd_thousands',
+      basis: 'point_in_time',
+      note: ZERO_UNREPORTED_NOTE,
+      in_default_set: false,
+    });
+    expect(output.entries.find((e) => e.code === 'held_to_maturity_fair_value')).toEqual({
+      code: 'held_to_maturity_fair_value',
+      label: 'Held-to-maturity securities at fair value',
+      field: 'SCHF',
+      unit: 'usd_thousands',
+      basis: 'point_in_time',
+      in_default_set: false,
+    });
+    expect(text).toContain(
+      `- **total_risk_based_capital** — Total risk-based capital — field RBC · unit usd_thousands · basis point_in_time · in default set: no · note: ${ZERO_UNREPORTED_NOTE}`,
+    );
+    expect(text).toContain(
+      '- **nonfarm_nonresidential_non_owner_occupied_loans** — Non-owner-occupied nonfarm nonresidential real estate loans — field LNRENROT · unit usd_thousands · basis point_in_time · in default set: no · note: Null before 2007',
+    );
   });
 
   it('lists the eight bank charter classes', async () => {

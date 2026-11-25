@@ -24,15 +24,255 @@ import {
 import { normalizeState, US_STATES } from '@/services/fdic/us-states.js';
 
 describe('metric catalog', () => {
-  it('holds 49 unique curated metrics, each mapped to an uppercase FDIC field', () => {
-    expect(METRIC_NAMES).toHaveLength(49);
-    expect(new Set(METRIC_NAMES).size).toBe(49);
+  it('holds 60 unique curated metrics on 60 distinct uppercase FDIC fields', () => {
+    expect(METRIC_NAMES).toHaveLength(60);
+    expect(new Set(METRIC_NAMES).size).toBe(60);
     for (const name of METRIC_NAMES) {
       const def = METRIC_CATALOG[name];
       expect(def.metric).toBe(name);
       expect(def.field).toMatch(/^[A-Z0-9]+$/);
     }
-    expect(new Set(METRIC_NAMES.map((m) => METRIC_CATALOG[m].field)).size).toBe(49);
+    expect(new Set(METRIC_NAMES.map((m) => METRIC_CATALOG[m].field)).size).toBe(60);
+  });
+
+  it('maps every metric to its FDIC field, unit, basis, label, and note', () => {
+    const Z = ZERO_UNREPORTED_NOTE;
+    const table = Object.fromEntries(
+      metricDefinitions(METRIC_NAMES).map(({ metric, field, unit, basis, note }) => {
+        const { label } = METRIC_CATALOG[metric];
+        return [
+          metric,
+          note === undefined ? [field, unit, basis, label] : [field, unit, basis, label, note],
+        ];
+      }),
+    );
+    expect(table).toEqual({
+      total_assets: ['ASSET', 'usd_thousands', 'point_in_time', 'Total assets'],
+      total_liabilities: ['LIAB', 'usd_thousands', 'point_in_time', 'Total liabilities'],
+      total_deposits: ['DEP', 'usd_thousands', 'point_in_time', 'Total deposits'],
+      domestic_deposits: [
+        'DEPDOM',
+        'usd_thousands',
+        'point_in_time',
+        'Deposits in domestic offices',
+      ],
+      insured_deposits: [
+        'DEPINS',
+        'usd_thousands',
+        'point_in_time',
+        'Estimated insured deposits',
+        'Estimated; null before FDIC collected it',
+      ],
+      uninsured_deposits: [
+        'DEPUNINS',
+        'usd_thousands',
+        'point_in_time',
+        'Estimated uninsured deposits',
+        'Estimated, domestic offices',
+      ],
+      insured_deposit_share: [
+        'ESTINS',
+        'percent',
+        'point_in_time',
+        'Estimated insured share of domestic deposits',
+        Z,
+      ],
+      brokered_deposits: ['BRO', 'usd_thousands', 'point_in_time', 'Brokered deposits'],
+      equity_capital: ['EQ', 'usd_thousands', 'point_in_time', 'Total equity capital'],
+      tier1_capital: ['RBCT1J', 'usd_thousands', 'point_in_time', 'Tier 1 (core) capital'],
+      total_risk_based_capital: [
+        'RBC',
+        'usd_thousands',
+        'point_in_time',
+        'Total risk-based capital',
+        Z,
+      ],
+      risk_weighted_assets: [
+        'RWAJ',
+        'usd_thousands',
+        'point_in_time',
+        'Total risk-weighted assets',
+        Z,
+      ],
+      net_loans: ['LNLSNET', 'usd_thousands', 'point_in_time', 'Net loans and leases'],
+      securities: ['SC', 'usd_thousands', 'point_in_time', 'Total securities'],
+      held_to_maturity_amortized_cost: [
+        'SCHA',
+        'usd_thousands',
+        'point_in_time',
+        'Held-to-maturity securities at amortized cost',
+      ],
+      held_to_maturity_fair_value: [
+        'SCHF',
+        'usd_thousands',
+        'point_in_time',
+        'Held-to-maturity securities at fair value',
+      ],
+      available_for_sale_amortized_cost: [
+        'SCAA',
+        'usd_thousands',
+        'point_in_time',
+        'Available-for-sale securities at amortized cost',
+      ],
+      available_for_sale_fair_value: [
+        'SCAF',
+        'usd_thousands',
+        'point_in_time',
+        'Available-for-sale debt securities at fair value',
+      ],
+      cash_and_due: ['CHBAL', 'usd_thousands', 'point_in_time', 'Cash and balances due'],
+      real_estate_loans: ['LNRE', 'usd_thousands', 'point_in_time', 'Real estate loans'],
+      construction_loans: [
+        'LNRECONS',
+        'usd_thousands',
+        'point_in_time',
+        'Construction and land development loans',
+        'Construction and land development',
+      ],
+      multifamily_loans: [
+        'LNREMULT',
+        'usd_thousands',
+        'point_in_time',
+        'Multifamily real estate loans',
+      ],
+      nonfarm_nonresidential_loans: [
+        'LNRENRES',
+        'usd_thousands',
+        'point_in_time',
+        'Nonfarm nonresidential real estate loans',
+        'Includes owner-occupied loans; the interagency CRE concentration test counts only the non-owner-occupied part',
+      ],
+      nonfarm_nonresidential_non_owner_occupied_loans: [
+        'LNRENROT',
+        'usd_thousands',
+        'point_in_time',
+        'Non-owner-occupied nonfarm nonresidential real estate loans',
+        'Null before 2007',
+      ],
+      farmland_loans: ['LNREAG', 'usd_thousands', 'point_in_time', 'Loans secured by farmland'],
+      residential_mortgage_loans: [
+        'LNRERES',
+        'usd_thousands',
+        'point_in_time',
+        'Residential mortgage loans',
+        '1–4 family',
+      ],
+      commercial_industrial_loans: [
+        'LNCI',
+        'usd_thousands',
+        'point_in_time',
+        'Commercial and industrial loans',
+      ],
+      agricultural_production_loans: [
+        'LNAG',
+        'usd_thousands',
+        'point_in_time',
+        'Loans to finance agricultural production and other loans to farmers',
+      ],
+      cre_loans_not_secured_by_real_estate: [
+        'LNCOMRE',
+        'usd_thousands',
+        'point_in_time',
+        'Commercial real estate loans not secured by real estate',
+      ],
+      consumer_loans: ['LNCON', 'usd_thousands', 'point_in_time', 'Consumer loans'],
+      noncurrent_loans: ['NCLNLS', 'usd_thousands', 'point_in_time', 'Noncurrent loans and leases'],
+      loan_loss_allowance: [
+        'LNATRES',
+        'usd_thousands',
+        'point_in_time',
+        'Allowance for loan and lease losses',
+      ],
+      other_real_estate_owned: ['ORE', 'usd_thousands', 'point_in_time', 'Other real estate owned'],
+      net_income: ['NETINCQ', 'usd_thousands', 'quarter', 'Net income (quarter)'],
+      net_income_ytd: ['NETINC', 'usd_thousands', 'year_to_date', 'Net income (year to date)'],
+      noninterest_income: ['NONIIQ', 'usd_thousands', 'quarter', 'Noninterest income (quarter)'],
+      noninterest_expense: ['NONIXQ', 'usd_thousands', 'quarter', 'Noninterest expense (quarter)'],
+      provision_for_credit_losses: [
+        'ELNATQ',
+        'usd_thousands',
+        'quarter',
+        'Provision for credit losses (quarter)',
+      ],
+      net_charge_offs: ['NTLNLSQ', 'usd_thousands', 'quarter', 'Net charge-offs (quarter)'],
+      roa: ['ROAQ', 'percent', 'quarter_annualized', 'Return on assets (quarter, annualized)'],
+      roa_ytd: ['ROA', 'percent', 'ytd_annualized', 'Return on assets (year to date, annualized)'],
+      roe: ['ROEQ', 'percent', 'quarter_annualized', 'Return on equity (quarter, annualized)'],
+      roe_ytd: ['ROE', 'percent', 'ytd_annualized', 'Return on equity (year to date, annualized)'],
+      net_interest_margin: [
+        'NIMYQ',
+        'percent',
+        'quarter_annualized',
+        'Net interest margin (quarter, annualized)',
+      ],
+      net_interest_margin_ytd: [
+        'NIMY',
+        'percent',
+        'ytd_annualized',
+        'Net interest margin (year to date, annualized)',
+      ],
+      efficiency_ratio: [
+        'EEFFQR',
+        'percent',
+        'quarter',
+        'Efficiency ratio (quarter)',
+        'Noninterest expense / revenue',
+      ],
+      efficiency_ratio_ytd: ['EEFFR', 'percent', 'year_to_date', 'Efficiency ratio (year to date)'],
+      net_charge_off_rate: [
+        'NTLNLSQR',
+        'percent',
+        'quarter_annualized',
+        'Net charge-off rate (quarter, annualized)',
+      ],
+      net_charge_off_rate_ytd: [
+        'NTLNLSR',
+        'percent',
+        'ytd_annualized',
+        'Net charge-off rate (year to date, annualized)',
+      ],
+      noncurrent_loan_rate: [
+        'NCLNLSR',
+        'percent',
+        'point_in_time',
+        'Noncurrent loan rate',
+        'Noncurrent / gross loans',
+      ],
+      nonperforming_asset_rate: [
+        'NPERFV',
+        'percent',
+        'point_in_time',
+        'Nonperforming asset rate',
+        'Nonperforming / total assets',
+      ],
+      reserve_coverage: [
+        'LNRESNCR',
+        'percent',
+        'point_in_time',
+        'Reserve coverage of noncurrent loans',
+        'Allowance / noncurrent loans',
+      ],
+      loans_to_deposits: ['LNLSDEPR', 'percent', 'point_in_time', 'Net loans to deposits'],
+      equity_to_assets: ['EQV', 'percent', 'point_in_time', 'Equity capital to assets'],
+      leverage_ratio: ['RBC1AAJ', 'percent', 'point_in_time', 'Tier 1 leverage ratio', Z],
+      cet1_ratio: ['IDT1CER', 'percent', 'point_in_time', 'Common equity tier 1 capital ratio', Z],
+      tier1_risk_based_ratio: [
+        'IDT1RWAJR',
+        'percent',
+        'point_in_time',
+        'Tier 1 risk-based capital ratio',
+        Z,
+      ],
+      total_risk_based_capital_ratio: [
+        'RBCRWAJ',
+        'percent',
+        'point_in_time',
+        'Total risk-based capital ratio',
+        Z,
+      ],
+      employees: ['NUMEMP', 'count', 'point_in_time', 'Employees', 'Full-time equivalent'],
+      domestic_offices: ['OFFDOM', 'count', 'point_in_time', 'Domestic offices'],
+    });
   });
 
   it('maps unsuffixed income and return metrics to single-quarter fields and _ytd to year-to-date', () => {
@@ -57,19 +297,24 @@ describe('metric catalog', () => {
     }
   });
 
-  it('flags exactly the four capital ratios and ESTINS as zero-means-unreported, with the note', () => {
+  it('flags exactly the four capital ratios, ESTINS, RBC, and RWAJ as zero-means-unreported, with the note', () => {
     const flagged = METRIC_NAMES.filter((m) => METRIC_CATALOG[m].zeroMeansUnreported);
     expect(flagged.sort()).toEqual(
       [
         'cet1_ratio',
         'insured_deposit_share',
         'leverage_ratio',
+        'risk_weighted_assets',
         'tier1_risk_based_ratio',
+        'total_risk_based_capital',
         'total_risk_based_capital_ratio',
       ].sort(),
     );
     expect(flagged.map((m) => METRIC_CATALOG[m].field).sort()).toEqual(
-      ['ESTINS', 'IDT1CER', 'IDT1RWAJR', 'RBC1AAJ', 'RBCRWAJ'].sort(),
+      ['ESTINS', 'IDT1CER', 'IDT1RWAJR', 'RBC', 'RBC1AAJ', 'RBCRWAJ', 'RWAJ'].sort(),
+    );
+    expect(ZERO_UNREPORTED_NOTE).toBe(
+      'Zero means not reported (not yet collected, community bank leverage ratio filer, uninsured trust company, or foreign-bank branch)',
     );
     for (const m of flagged) expect(METRIC_CATALOG[m].note).toBe(ZERO_UNREPORTED_NOTE);
   });

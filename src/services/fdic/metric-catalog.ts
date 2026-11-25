@@ -31,15 +31,26 @@ export const METRIC_NAMES = [
   'insured_deposit_share',
   'brokered_deposits',
   'equity_capital',
+  'tier1_capital',
+  'total_risk_based_capital',
+  'risk_weighted_assets',
   'net_loans',
   'securities',
+  'held_to_maturity_amortized_cost',
+  'held_to_maturity_fair_value',
+  'available_for_sale_amortized_cost',
+  'available_for_sale_fair_value',
   'cash_and_due',
   'real_estate_loans',
   'construction_loans',
   'multifamily_loans',
   'nonfarm_nonresidential_loans',
+  'nonfarm_nonresidential_non_owner_occupied_loans',
+  'farmland_loans',
   'residential_mortgage_loans',
   'commercial_industrial_loans',
+  'agricultural_production_loans',
+  'cre_loans_not_secured_by_real_estate',
   'consumer_loans',
   'noncurrent_loans',
   'loan_loss_allowance',
@@ -84,12 +95,12 @@ export interface MetricDefinition {
   metric: MetricName;
   note?: string;
   unit: MetricUnit;
-  /** FDIC reports `0` for this ratio when the institution did not report it. */
+  /** FDIC reports `0` for this field when the institution did not report it. */
   zeroMeansUnreported: boolean;
 }
 
 export const ZERO_UNREPORTED_NOTE =
-  'Zero means not reported (not yet collected, community bank leverage ratio filer, or foreign-bank branch)';
+  'Zero means not reported (not yet collected, community bank leverage ratio filer, uninsured trust company, or foreign-bank branch)';
 
 type Entry = [field: string, unit: MetricUnit, basis: MetricBasis, label: string, note?: string];
 
@@ -120,8 +131,35 @@ const ENTRIES: Record<MetricName, Entry> = {
   ],
   brokered_deposits: ['BRO', 'usd_thousands', 'point_in_time', 'Brokered deposits'],
   equity_capital: ['EQ', 'usd_thousands', 'point_in_time', 'Total equity capital'],
+  tier1_capital: ['RBCT1J', 'usd_thousands', 'point_in_time', 'Tier 1 (core) capital'],
+  total_risk_based_capital: ['RBC', 'usd_thousands', 'point_in_time', 'Total risk-based capital'],
+  risk_weighted_assets: ['RWAJ', 'usd_thousands', 'point_in_time', 'Total risk-weighted assets'],
   net_loans: ['LNLSNET', 'usd_thousands', 'point_in_time', 'Net loans and leases'],
   securities: ['SC', 'usd_thousands', 'point_in_time', 'Total securities'],
+  held_to_maturity_amortized_cost: [
+    'SCHA',
+    'usd_thousands',
+    'point_in_time',
+    'Held-to-maturity securities at amortized cost',
+  ],
+  held_to_maturity_fair_value: [
+    'SCHF',
+    'usd_thousands',
+    'point_in_time',
+    'Held-to-maturity securities at fair value',
+  ],
+  available_for_sale_amortized_cost: [
+    'SCAA',
+    'usd_thousands',
+    'point_in_time',
+    'Available-for-sale securities at amortized cost',
+  ],
+  available_for_sale_fair_value: [
+    'SCAF',
+    'usd_thousands',
+    'point_in_time',
+    'Available-for-sale debt securities at fair value',
+  ],
   cash_and_due: ['CHBAL', 'usd_thousands', 'point_in_time', 'Cash and balances due'],
   real_estate_loans: ['LNRE', 'usd_thousands', 'point_in_time', 'Real estate loans'],
   construction_loans: [
@@ -142,8 +180,16 @@ const ENTRIES: Record<MetricName, Entry> = {
     'usd_thousands',
     'point_in_time',
     'Nonfarm nonresidential real estate loans',
-    'Commercial real estate',
+    'Includes owner-occupied loans; the interagency CRE concentration test counts only the non-owner-occupied part',
   ],
+  nonfarm_nonresidential_non_owner_occupied_loans: [
+    'LNRENROT',
+    'usd_thousands',
+    'point_in_time',
+    'Non-owner-occupied nonfarm nonresidential real estate loans',
+    'Null before 2007',
+  ],
+  farmland_loans: ['LNREAG', 'usd_thousands', 'point_in_time', 'Loans secured by farmland'],
   residential_mortgage_loans: [
     'LNRERES',
     'usd_thousands',
@@ -156,6 +202,18 @@ const ENTRIES: Record<MetricName, Entry> = {
     'usd_thousands',
     'point_in_time',
     'Commercial and industrial loans',
+  ],
+  agricultural_production_loans: [
+    'LNAG',
+    'usd_thousands',
+    'point_in_time',
+    'Loans to finance agricultural production and other loans to farmers',
+  ],
+  cre_loans_not_secured_by_real_estate: [
+    'LNCOMRE',
+    'usd_thousands',
+    'point_in_time',
+    'Commercial real estate loans not secured by real estate',
   ],
   consumer_loans: ['LNCON', 'usd_thousands', 'point_in_time', 'Consumer loans'],
   noncurrent_loans: ['NCLNLS', 'usd_thousands', 'point_in_time', 'Noncurrent loans and leases'],
@@ -254,8 +312,21 @@ const ENTRIES: Record<MetricName, Entry> = {
   domestic_offices: ['OFFDOM', 'count', 'point_in_time', 'Domestic offices'],
 };
 
-/** Fields FDIC reports as `0` when the ratio was not reported. */
-const ZERO_UNREPORTED_FIELDS = new Set(['ESTINS', 'RBC1AAJ', 'IDT1CER', 'IDT1RWAJR', 'RBCRWAJ']);
+/**
+ * Fields FDIC reports as `0` when the institution did not report them. `RBC` and
+ * `RWAJ` read `0` for community bank leverage ratio filers, which file no
+ * risk-based capital; those filers do report tier 1 capital (`RBCT1J`), so it
+ * stays unflagged.
+ */
+const ZERO_UNREPORTED_FIELDS = new Set([
+  'ESTINS',
+  'RBC1AAJ',
+  'IDT1CER',
+  'IDT1RWAJR',
+  'RBCRWAJ',
+  'RBC',
+  'RWAJ',
+]);
 
 export const METRIC_CATALOG: Record<MetricName, MetricDefinition> = Object.fromEntries(
   METRIC_NAMES.map((metric) => {

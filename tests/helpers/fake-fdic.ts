@@ -3,8 +3,9 @@
  * `getJson` seam as a route table that records every URL it receives, plus
  * builders for the BankFind response envelope in its recorded shapes (row hits,
  * aggregation buckets, the 400 error body) across all five endpoints, recorded
- * `/history` rows, and the quarter matcher that panel page responders serve
- * single quarters and ranges by.
+ * `/history` rows, the quarter matcher that panel page responders serve single
+ * quarters and ranges by, and name-search responders whose order alternates or
+ * follows a per-read script.
  * @module tests/helpers/fake-fdic
  */
 
@@ -534,6 +535,167 @@ export function branchHistoryRow(cert: number, date: string, id: string): Record
     EFFDATE: `${date}T00:00:00`,
     OFF_NAME: `OFFICE ${id}`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Name searches answered in alternating orders
+// ---------------------------------------------------------------------------
+
+type SearchRow = Record<string, unknown> | Hit;
+
+/** `rows` sorted by `fields`, each in `order`; ties keep their order in `rows`, a missing value last. */
+function sortRows(
+  rows: readonly SearchRow[],
+  fields: readonly string[],
+  order: string | undefined,
+): SearchRow[] {
+  const sign = order?.toUpperCase() === 'DESC' ? -1 : 1;
+  const value = (row: SearchRow, field: string) =>
+    (isHit(row) ? row.data : row)[field] as string | number | undefined;
+  return [...rows].sort((a, b) => {
+    for (const field of fields) {
+      const x = value(a, field);
+      const y = value(b, field);
+      if (x === y) continue;
+      if (x === undefined) return 1;
+      if (y === undefined) return -1;
+      return (x < y ? -1 : 1) * sign;
+    }
+    return 0;
+  });
+}
+
+/**
+ * `/institutions` answers to a name search as FDIC gives them: the same query
+ * comes back in either of two orders, alternating read by read (A, B, A, …) per
+ * query — `search`, `filters`, and the sort together, paging parameters aside.
+ * A request with `sort_by` is sorted by its fields (each in `sort_order`) over
+ * that read's order, so ties keep the alternating order unless the sort names a
+ * tiebreak. Rows are served as FDIC pages them, `total` counting every row; with
+ * `shortPages`, a page request under 10,000 rows comes back one row short on every
+ * other read. `check` runs on every request; a throw inside a responder would reach
+ * the service as a transport failure, so its failures are recorded instead, and
+ * `assertClean()` rethrows the first at the end of the test.
+ */
+export class AlternatingSearch {
+  readonly #check: ((params: Params) => void) | undefined;
+  readonly #failures: unknown[] = [];
+  readonly #orders: readonly [readonly SearchRow[], readonly SearchRow[]];
+  readonly #reads = new Map<string, number>();
+  readonly #shortPages: boolean;
+
+  constructor(
+    orders: readonly [readonly SearchRow[], readonly SearchRow[]],
+    options: { check?: (params: Params) => void; shortPages?: boolean } = {},
+  ) {
+    this.#orders = orders;
+    this.#check = options.check;
+    this.#shortPages = options.shortPages ?? false;
+  }
+
+  readonly respond = ({ params }: FakeRequest) => {
+    try {
+      this.#check?.(params);
+    } catch (err) {
+      this.#failures.push(err);
+    }
+    const query = JSON.stringify([
+      params.search,
+      params.filters,
+      params.sort_by,
+      params.sort_order,
+    ]);
+    const read = this.#reads.get(query) ?? 0;
+    this.#reads.set(query, read + 1);
+    const base = this.#orders[read % 2] ?? [];
+    const rows = params.sort_by
+      ? sortRows(base, params.sort_by.split(','), params.sort_order)
+      : base;
+    const offset = Number(params.offset ?? 0);
+    const limit = Number(params.limit ?? 10);
+    const size = this.#shortPages && limit > 1 && limit < 10_000 && read % 2 ? limit - 1 : limit;
+    return envelope('institutions', rows.slice(offset, offset + size), { total: rows.length });
+  };
+
+  /** Throws the first failure `check` raised. */
+  assertClean(): void {
+    if (this.#failures.length) throw this.#failures[0];
+  }
+}
+
+/** One row read a {@link ScriptedSearch} serves: the `n`th read (from 0) at this `offset`. */
+export interface ScriptedRead {
+  readonly n: number;
+  readonly offset: number;
+}
+
+/**
+ * `/institutions` answers to one relevance search whose order the test scripts read
+ * by read. `pick` names the order (an index into `orders`) the `n`th row read at an
+ * offset gets, or returns an `Error` to throw for that read. A count (`limit=0`)
+ * answers order 0's total and never advances a read number, so the script follows
+ * row reads only. `dataAsOf[i]` stamps order `i` with its own index build.
+ * `reads(offset)` counts the row reads an offset received. A failed `check` or an
+ * out-of-range pick is recorded, not thrown — a throw inside a responder reaches the
+ * service as a transport failure — and `assertClean()` rethrows the first.
+ */
+export class ScriptedSearch {
+  readonly #check: ((params: Params) => void) | undefined;
+  readonly #dataAsOf: readonly string[];
+  readonly #failures: unknown[] = [];
+  readonly #orders: readonly (readonly SearchRow[])[];
+  readonly #pick: (read: ScriptedRead) => number | Error;
+  readonly #reads = new Map<number, number>();
+
+  constructor(
+    orders: readonly (readonly SearchRow[])[],
+    pick: (read: ScriptedRead) => number | Error,
+    options: { check?: (params: Params) => void; dataAsOf?: readonly string[] } = {},
+  ) {
+    this.#orders = orders;
+    this.#pick = pick;
+    this.#check = options.check;
+    this.#dataAsOf = options.dataAsOf ?? [];
+  }
+
+  readonly respond = ({ params }: FakeRequest) => {
+    try {
+      this.#check?.(params);
+    } catch (err) {
+      this.#failures.push(err);
+    }
+    const offset = Number(params.offset ?? 0);
+    const limit = Number(params.limit ?? 10);
+    if (limit === 0) {
+      return envelope('institutions', [], { total: this.#orders[0]?.length ?? 0 });
+    }
+    const n = this.#reads.get(offset) ?? 0;
+    this.#reads.set(offset, n + 1);
+    const picked = this.#pick({ n, offset });
+    if (picked instanceof Error) throw picked;
+    const rows = this.#orders[picked];
+    if (!rows) {
+      this.#failures.push(new Error(`pick returned order ${picked}, which does not exist`));
+      return envelope('institutions', []);
+    }
+    const body = envelope('institutions', rows.slice(offset, offset + limit), {
+      total: rows.length,
+    });
+    const stamp = this.#dataAsOf[picked];
+    return stamp
+      ? { ...body, meta: { ...body.meta, index: { ...body.meta.index, createTimestamp: stamp } } }
+      : body;
+  };
+
+  /** Row reads received at `offset`. */
+  reads(offset: number): number {
+    return this.#reads.get(offset) ?? 0;
+  }
+
+  /** Throws the first failure `check` or `pick` raised. */
+  assertClean(): void {
+    if (this.#failures.length) throw this.#failures[0];
+  }
 }
 
 /** FDIC's 400 body for a calendar-invalid date in a date-typed range. */

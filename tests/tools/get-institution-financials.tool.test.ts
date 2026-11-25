@@ -452,7 +452,7 @@ describe('errors', () => {
     ['a fifth quarter', { to_date: '2025Q5' }],
     ['an impossible compact date', { from_date: '20250332' }],
     ['a US-format date', { to_date: '06/30/2026' }],
-    ['an unknown metric', { metrics: ['tier1_capital'] }],
+    ['an unknown metric', { metrics: ['tier2_capital'] }],
     ['a raw FDIC field as a metric', { metrics: ['ROA'] }],
     ['more than 1000 raw metrics', { metrics: Array.from({ length: 1001 }, () => 'roa') }],
     ['quarters over safety ceiling', { quarters: 10_001 }],

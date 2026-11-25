@@ -117,7 +117,7 @@ Staging runs on DuckDB and is on by default; `CANVAS_PROVIDER_TYPE=none` turns i
 ### `fdic_list_reference` <sub>tool</sub>
 
 - One `topic` per call: `metrics`, `bank_classes`, `failure_methods`, `change_codes`, `insurance_funds`, `peer_asset_bands`, or `coverage`
-- `metrics` lists all 49 metric names with FDIC field, unit, basis, caveat, and `in_default_set`; `change_codes` lists the 41 FDIC structure-change codes with their `event_type` and `level` (`institution`, `branch`, or `both`); served from built-in tables with no request to FDIC
+- `metrics` lists all 60 metric names with FDIC field, unit, basis, caveat, and `in_default_set`; `change_codes` lists the 41 FDIC structure-change codes with their `event_type` and `level` (`institution`, `branch`, or `both`); served from built-in tables with no request to FDIC
 
 ---
 
@@ -150,8 +150,8 @@ FDIC-specific:
 
 - Reads five BankFind datasets: institutions (every insured charter, active and inactive), quarterly Call Report financials from 1984, failures and assistance transactions from 1934, structure-change history (mergers from 1969, failures from 1970), and the annual Summary of Deposits from 1994
 - Paced requests (`FDIC_RATE_LIMIT_RPS`, at most four in flight) with a response cache and a cooldown after an FDIC 429, retried honoring `Retry-After`; each call has a 45-second budget (55 seconds for a panel, or a history read that includes `branch`)
-- A curated catalog of 49 Call Report metrics with FDIC field code, unit, and basis; `_ytd` metrics accumulate from January 1, and unsuffixed income and return metrics cover a single quarter
-- Handles BankFind's quirks: case-sensitive code values, string-typed report dates, absence sentinels, and ratios reported as `0` when a bank did not report them
+- A curated catalog of 60 Call Report metrics with FDIC field code, unit, and basis; `_ytd` metrics accumulate from January 1, and unsuffixed income and return metrics cover a single quarter
+- Handles BankFind's quirks: case-sensitive code values, string-typed report dates, absence sentinels, and ratios and risk-based capital amounts reported as `0` when a bank did not report them
 - Array inputs are deduplicated in order and capped at 1,000 items; empty `certs`, `peer_certs`, `bank_classes`, `methods`, and `event_types` are rejected
 
 Agent-friendly output:
@@ -218,7 +218,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 - **Clone and install:**
 
